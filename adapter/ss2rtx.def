@@ -1,0 +1,7 @@
+LIBRARY dxgi
+EXPORTS
+    CreateDXGIFactory = ss2rtx_CreateDXGIFactory
+    CreateDXGIFactory1 = ss2rtx_CreateDXGIFactory1
+    CreateDXGIFactory2 = ss2rtx_CreateDXGIFactory2
+    DXGIDeclareAdapterRemovalSupport = ss2rtx_DXGIDeclareAdapterRemovalSupport
+    DXGIGetDebugInterface1 = ss2rtx_DXGIGetDebugInterface1

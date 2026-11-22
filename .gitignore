@@ -1,0 +1,18 @@
+# Not ours to publish, or local to one machine
+/game/
+/prefix/
+/runtime/
+/toolchain/
+/saves/
+/run/
+/game.json
+/local.json
+# Build output and test images
+/adapter/build/
+/tests/build/
+/tests/baseline/
+__pycache__/
+# Working notes kept locally
+/PLAN.md
+/PHASE0.md
+/PHASE1.md
