@@ -69,7 +69,8 @@ Besides fixing what is listed above:
   row has two settings: the engine's brightness (fixed exposure, no tone curve) and
   Remix's own (auto exposure, tone mapped). The third would keep the fixed exposure, so
   rooms stay as bright as the game makes them, with Remix's tone mapper on, whose colours
-  look truer to the game. Not started.
+  look truer to the game. Better still, make the parts adjustable in the panel (tone
+  mapping, auto exposure, exposure) and let "Look" only fill them in. Not started.
 - Playing the game through path traced, deck by deck, to find the engine's remaining
   special cases.
 
