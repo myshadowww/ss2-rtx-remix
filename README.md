@@ -61,6 +61,18 @@ DLSS Performance. The game stays at its 120 fps cap at 720p and 1080p.
 - Linux and Proton only so far. The adapter is ordinary Win32 code and may well work on
   Windows; it has not been tried.
 
+## Backlog
+
+Besides fixing what is listed above:
+
+- **A third look: the engine's brightness with Remix's tone mapping.** The F11 "Look"
+  row has two settings: the engine's brightness (fixed exposure, no tone curve) and
+  Remix's own (auto exposure, tone mapped). The third would keep the fixed exposure, so
+  rooms stay as bright as the game makes them, with Remix's tone mapper on, whose colours
+  look truer to the game. Not started.
+- Playing the game through path traced, deck by deck, to find the engine's remaining
+  special cases.
+
 ## How it works
 
 ```
