@@ -160,7 +160,14 @@ it with the game running; expect one slow frame while everything is rebuilt.
 `ss2rtx_cache/textures_seen.txt` lists every texture the adapter has met, and the
 `.dds` files next to it are the textures themselves.
 
-A starter set, made by a script from the textures themselves:
+The installer puts a marked block of lines at the top of this file: roughness and
+metalness chosen by hand for the 46 surfaces that cover most of the decks
+(`materials/handmade.txt` in the repository). `python3 install.py install --steam
+--no-materials` leaves it out, and `python3 tools/author.py --steam --remove` takes it
+out for good (a later install does not put it back). Your own lines, below the block,
+win over it.
+
+A fuller set, made by a script from the textures themselves:
 
     python3 tools/author.py --steam      # or no option: the private test copy
     python3 tools/author.py --steam --remove

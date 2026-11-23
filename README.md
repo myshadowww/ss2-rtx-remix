@@ -93,8 +93,9 @@ DLSS Performance. The game stays at its 120 fps cap at 720p and 1080p.
 - Where the engine adds a faint layer as displayed, the same layer added as light is far
   brighter (a fiftieth of opacity shows as a sixth). Such layers are left out or cut; the
   thin grid lines over a lit plasma floor are among what is lost.
-- Materials are a start: roughness and metalness by hand for 46 surfaces, relief and the
-  rest a guess from each texture's colour. None is installed unless you run the script.
+- Materials are a start: roughness and metalness by hand for 46 surfaces (installed by
+  default), relief and the rest a guess from each texture's colour (only if you run the
+  script).
 - Remix's replacement mods (the RTX Remix Toolkit workflow) do not apply to content
   submitted through the API in runtime 1.6.1, so the Toolkit cannot be used to author
   for this. The override table is the authoring route.
