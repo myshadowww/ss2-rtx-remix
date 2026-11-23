@@ -24,9 +24,9 @@ your own download of the Remix runtime; neither is in this repository.
   the engine's own per-frame values; muzzle flashes and other moving lights.
 - Brightness and light colour close to the engine's: each light's strength is fitted to
   the lightmaps the engine baked (read from the mission file), in linear light and less
-  what bounced light adds, channel by channel. The same views rendered both ways are
-  within about a quarter of each other in mean level (a large hangar up to 26% brighter,
-  a dark corridor 24% darker).
+  what bounced light adds, channel by channel, with the engine's ambient level as a floor.
+  At 69 places over all 23 decks (three a deck, picked by a script), two thirds of the
+  views are within 25% of the engine's mean level and seven eighths within 50%.
 - Particles and sparks with the engine's own blend and per-vertex colour; water surfaces
   (mirror-smooth, a see-through skin, or a boundary that bends light).
 - Screens, lit signs, glow layers, decals, see-through surfaces, the sky box through
@@ -55,6 +55,9 @@ DLSS Performance. The game stays at its 120 fps cap at 720p and 1080p.
   and the engine's with the distance, so surfaces near a light are brighter than the
   engine's and far ones darker even when the room as a whole matches. Coloured light is a
   little weaker than the engine's.
+- The engine's view-dependent "incidence" maps are not applied: the light panels of one
+  corridor (Ops 1) glow white where the engine keeps them dark, and a few other full-bright
+  parts are brighter than they should be.
 - Materials have one default roughness unless you write overrides. No remastered content
   is included.
 - Remix's replacement mods (the RTX Remix Toolkit workflow) do not apply to content
@@ -96,7 +99,7 @@ Source layout:
 | `adapter/src/census.cpp` | dumps one frame's draw stream for analysis |
 | `tests/` | stand-alone probes: Remix under Proton, readback, the D3D11 hand-off |
 | `build.py`, `install.py`, `launch.py`, `play.py`, `regress.py` | build, install, test launcher, Steam launch wrapper, regression check |
-| `tools/` | mission sweep, start-anywhere, side-by-side survey, draw-stream census reader |
+| `tools/` | mission sweep, start-anywhere, side-by-side survey, a walk through every deck in both renderers, draw-stream census reader |
 
 ## Building and running
 

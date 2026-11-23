@@ -83,7 +83,7 @@ variables override it):
 | `Emissive` | 0.4 | brightness of full-bright object parts (lamp faces); 0.32 already shows as full white |
 | `ScreenEmissive` | 0.4 | brightness of full-bright level surfaces and glow layers (screens, lit signs); these light the room around them |
 | `EmissiveLight` | 0.15 | how much of a lamp face's or screen's brightness it also casts as light; the engine's cast none, 1 lets them light their rooms fully |
-| `AmbientScale` | 0 | how much of the engine's ambient light ordinary surfaces give off; off by default because that light bounces and floods closed pale rooms |
+| `AmbientFloor` | 1 | surfaces give off the engine's ambient level themselves (the darkest its lightmaps go), so a corner no lamp reaches is dim as in the engine and not black; 0: off |
 | `LiveLights` | 1 | flashing, flickering and switched lights follow the engine's own value each frame (or replay their rhythm from the mission file where that is not to be had); 0: every light steady at its table value |
 | `FitLights` | 1 | fit each light's strength to the level, where a plain match at five units leaves corridors too bright and big rooms too dark |
 | `FitLightmaps` | 1 | do that fit against the engine's own baked lightmaps from the mission file (0: against an assumed falloff rule only) |
@@ -166,6 +166,8 @@ it with the game running; expect one slow frame while everything is rebuilt.
     python3 tools/tour.py medsci2 --at=-12,-190,2,0        # ...with the player put at that spot, facing 0 degrees
     python3 tools/survey.py medsci2 -12,-190,2,0 icu       # same four views path traced and engine, into run/survey/
     python3 tools/steam_game_running.py && echo "the Steam copy is running"
+    python3 tools/walk.py                                  # three places in each of the 23 decks, both renderers, into run/walk/ (75 minutes)
+    python3 tools/walk.py ops1 --spots 5                   # one deck, more places
     python3 tools/sweep.py                                 # all 23 missions path-traced, results in run/sweep/
 
     python3 regress.py --update                            # store screenshots as the baseline
@@ -199,8 +201,13 @@ anything heavy on the disk at the same time: the menu keys are timed.
   light's strength is fitted to what the engine baked into its lightmaps, less what
   bounced light will add, and lights close to a wall are moved a little way out from it
   (two units at most) so the wall gets a glow, not a small bright disc. Measured against
-  the engine in the same views: within about a quarter either way (the station's hangar
-  up to 26% brighter, a dark MedSci corridor 24% darker, Hydroponics in between). Colours
-  are close; the engine's are a little stronger. F11, exposure, changes the overall level.
-- Every mission loads and renders (`tools/sweep.py`), but each was only looked at from
-  its start position.
+  the engine at 69 places over all 23 decks: two thirds within 25% of the engine's mean
+  level, seven eighths within 50%. Colours are close; the engine's are a little stronger.
+  F11, exposure, changes the overall level.
+- Known to be wrong: the light panels of the first corridor of Ops 1 glow white where the
+  engine keeps them dark, and a wall band in Rec 1 is too bright (the engine's
+  view-dependent "incidence" maps are not applied).
+- `Skip=<letters>` in `ss2rtx.ini` leaves parts of the scene out of the path-traced image
+  (o objects, l lights, c characters): for finding where something on screen comes from.
+- Every mission loads and renders, and a script has looked at three places in each
+  (`tools/walk.py`). Nobody has played a level through this way.
