@@ -29,7 +29,11 @@ struct TextureDump {
   // compressed formats. `has_mean` is false for formats this does not read.
   bool has_mean = false;
   float mean_rgb[3] = { 0.5f, 0.5f, 0.5f };
+  float mean_alpha = 1.0f;
 };
+
+// The same rough average colour for a texture file this module wrote earlier.
+bool dds_rough_mean(const std::wstring& path, float* rgba);   // four values: colour and alpha
 
 // Writes all mips of a 2D texture as a DDS file (DX10 header) under `dir`, named by
 // content hash, and returns the full path in `path`. `view_format` picks the concrete

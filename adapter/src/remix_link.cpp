@@ -85,7 +85,7 @@ static size_t g_stat_instances;
 // engine, came out fully lit with it at 1. Bounced light from the real lights already
 // fills rooms more than the engine's ambient does. g_ambient_emissive is the level the
 // materials were made with.
-static float g_ambient_scale = 0.0f;
+static float g_ambient_scale = 1.0f;
 static float g_ambient_emissive;
 static bool g_see_through = true;       // SeeThrough=0 leaves the engine's see-through surfaces out, as before
 static bool g_use_live_lights = true;   // LiveLights=0: mission lights always at their table brightness
@@ -242,7 +242,7 @@ static bool start() {
   g_see_through = config_flag(L"SeeThrough", true);
   g_keep_objects = config_flag(L"KeepObjects", true);
   settings_start();
-  g_ambient_scale = (float)config_number(L"AmbientScale", g_ambient_scale);
+  g_ambient_scale = (float)config_number(L"AmbientFloor", g_ambient_scale);
   g_use_live_lights = config_flag(L"LiveLights", true);
   g_gloss_roughness = (float)config_number(L"GlossRoughness", 0.3);
   char sweep[256];
@@ -586,7 +586,7 @@ static void submit_animated_polygons() {
     const WorldRange& r = it->second;
     if (r.texture < 0 || (size_t)r.start + r.count > w.indices.size()) continue;
     const SceneTexture& tex = textures[r.texture];
-    bool self_lit = r.unshaded || r.illumination >= 0.5f;
+    bool self_lit = r.unshaded;
     auto key = std::make_pair(start, tex.hash);
     auto found = g_animated_meshes.find(key);
     if (found == g_animated_meshes.end()) {
@@ -742,6 +742,9 @@ static void submit_glow_polygons() {
     // Drawn this frame without its glow pass: the engine has switched the glow off.
     if (r.seen_frame != ~0ull && r.glow_frame != ~0ull && r.seen_frame > r.glow_frame + 1) continue;
     uint32_t step = (uint32_t)(r.glow_strength * kGlowSteps + 0.5f);
+    // The engine adds a glow layer scaled by its texture's alpha. One whose texture is
+    // see-through nearly everywhere adds next to nothing there, whatever colour it holds.
+    if (r.glow_texture >= 0 && (size_t)r.glow_texture < textures.size() && textures[(size_t)r.glow_texture].has_mean && textures[(size_t)r.glow_texture].mean_alpha < 0.03f) step = 0;
     if (step == 0) continue;
     const SceneTexture& tex = textures[r.glow_texture];
     auto key = std::make_pair(start ^ 0x80000000u, tex.hash * 31 + step);
@@ -749,7 +752,9 @@ static void submit_glow_polygons() {
     if (found == g_animated_meshes.end()) {
       if (g_animated_meshes.size() > 4096) drop_animated_meshes();
       SurfaceBuild s;
-      s.material = material_for(&tex, false, r.color, true, kGlow, screen_strength(step / kGlowSteps));
+      // A layer whose texture has no see-through parts is pure added light (the engine adds
+      // it scaled by the material's alpha); as a covering it would hide the wall under it.
+      s.material = material_for(&tex, false, r.color, true, tex.has_mean && tex.mean_alpha > 0.9f ? kLit : kGlow, screen_strength(step / kGlowSteps));
       for (uint32_t i = r.start; i + 2 < r.start + r.count; i += 3)
         for (int k : order) if (w.indices[i + k] < w.vertices.size()) add_index(s, w, w.indices[i + k], r.glow_scale, r.glow_uv_matrix, kGlowLift);
       remixapi_MeshHandle mesh = nullptr;
@@ -805,11 +810,14 @@ static void build_level(double seconds) {
     // fake reflection (or nothing) in it, then the panel itself, slightly see-through. Here
     // the second layer is the surface, made glossy so it reflects for real. A second layer
     // over a normally lit first one is a decal instead.
-    bool second_is_surface = over && (!base || base->uniform || base->solid || r.unshaded);
+    // (A second layer that is mostly see-through is lines or lettering on the first, never
+    // the surface itself: the training rooms' grid.)
+    bool sparse = over && over->has_mean && over->mean_alpha < 0.5f;
+    bool second_is_surface = over && !sparse && (!base || base->uniform || base->solid || r.unshaded);
     const SceneTexture* main = second_is_surface ? over : base;
     // Full-bright polygons (screens, lit signs) glow. A blank first layer says nothing
     // about the surface, so there the second layer's own flag counts.
-    bool self_lit = second_is_surface ? r.overlay_unshaded : r.unshaded || r.illumination >= 0.5f;
+    bool self_lit = second_is_surface ? r.overlay_unshaded : r.unshaded;
     // Water, by the mission file. Mirror-smooth with the engine's texture, or a see-through
     // skin: then only the side seen from the air is kept, the other would lie on top of it.
     int water = g_water_mode ? scene_water_at(r.start) : 0;
@@ -820,17 +828,24 @@ static void build_level(double seconds) {
     }
     bool skin = water && g_water_mode >= 2;
     if (skin) self_lit = false;
+    // A full-bright surface is as bright as its material's colour says: the engine shows
+    // texture times colour, and a dark colour is how it keeps a switched-off panel dim.
+    float tint = r.color[0] > r.color[1] ? (r.color[0] > r.color[2] ? r.color[0] : r.color[2]) : (r.color[1] > r.color[2] ? r.color[1] : r.color[2]);
+    tint = tint < 0.0f ? 0.0f : tint > 1.0f ? 1.0f : tint;
+    uint32_t tint_step = (uint32_t)(tint * 16.0f + 0.5f);
+    if (self_lit && tint_step == 0) self_lit = false;
+    float lit_level = self_lit ? powf((float)tint_step / 16.0f, 2.2f) : 1.0f;   // to linear light, like everything the engine multiplies on screen
     uint64_t key = ((uint64_t)(uint32_t)(second_is_surface ? r.overlay_texture : r.texture) << 5) | (r.alpha_test ? 1 : 0) | (second_is_surface ? 2 : 0) |
-                   (self_lit ? 4 : 0) | (water ? 8 : 0) | (skin ? 16 : 0);
+                   (self_lit ? 4 : 0) | (water ? 8 : 0) | (skin ? 16 : 0) | ((uint64_t)(self_lit ? tint_step : 0) << 40);
     if (skin) key = 0x57415445525f5348ull + (uint64_t)g_water_mode;   // one surface for all of it
     SurfaceBuild& s = surfaces[key];
     if (!s.material)
       s.material = skin ? water_material(g_water_mode == 3) :
-                   material_for(main, r.alpha_test && !second_is_surface, r.color, self_lit, kSurface, screen_strength(g_emissive_light),
+                   material_for(main, r.alpha_test && !second_is_surface, r.color, self_lit, kSurface, screen_strength(g_emissive_light) * lit_level,
                                 water ? 2 : second_is_surface ? 1 : 0);
     if (self_lit && main && g_emissive_light < 1.0f) {   // the rest of its brightness, for the eye only
       SurfaceBuild& lit = lit_layers[key];
-      if (!lit.material) lit.material = material_for(main, false, r.color, true, kLit, screen_strength(1.0f - g_emissive_light));
+      if (!lit.material) lit.material = material_for(main, false, r.color, true, kLit, screen_strength(1.0f - g_emissive_light) * lit_level);
       for (uint32_t i = r.start; i + 2 < r.start + r.count; i += 3)
         for (int k : order)
           if (w.indices[i + k] < w.vertices.size())
@@ -989,6 +1004,7 @@ static std::vector<remixapi_LightHandle> g_moving_handles;
 static std::vector<remixapi_Float3D> g_light_shown;
 static std::vector<float> g_light_gain;      // strength relative to the plain five-unit match
 static const float kFitShare = 0.6f;
+static float g_baked_floor = -1.0f;   // the engine's ambient level as its lightmaps show it (their darkest twentieth), or -1
 static const float kDarkSide = 0.8f;   // the lightmap fit aims a little under the engine: darker is the better side to miss on
 static void lights_restated();
 
@@ -1341,6 +1357,18 @@ static bool fit_to_baked(const LevelBvh& bvh, const std::vector<SceneLight>& lig
     all.push_back(gain[i]);
     ++fitted_steady;
   }
+  // The darkest the engine leaves any surface: its ambient light, which no lamp supplies.
+  // Surfaces give that much off themselves (see follow_ambient()).
+  {
+    std::vector<float> levels;
+    for (size_t j = 0; j < count; ++j)
+      if (polys[j].area > 0.0 && steady[j * 3] >= 0.0f) levels.push_back((steady[j * 3] + steady[j * 3 + 1] + steady[j * 3 + 2]) / 3.0f);
+    if (levels.size() > 20) {
+      std::nth_element(levels.begin(), levels.begin() + levels.size() / 20, levels.end());
+      g_baked_floor = levels[levels.size() / 20];
+      if (g_baked_floor > 0.2f) g_baked_floor = 0.2f;
+    }
+  }
   std::sort(all.begin(), all.end());
   logf("remix: lights fitted to the engine's lightmaps: %u steady and %u changing ones (strength against the five-unit match: median %.2f, least %.2f, most %.1f); "
        "%zu polygon-light pairs from %zu rays; light sent to the level was %.0f%% of the baked target before, %.0f%% after; "
@@ -1397,6 +1425,9 @@ static void place_lights() {
   }
   unsigned moved = 0, fitted = 0;
   float furthest = 0.0f;
+  // Lights only met in the engine's per-object lists carry what reaches an object, not
+  // their own strength: nothing to fit.
+  bool from_mission = scene_lights_from_mission();
   std::vector<float> gains;
   for (size_t i = 0; i < lights.size(); ++i) {
     const SceneLight& l = lights[i];
@@ -1405,7 +1436,7 @@ static void place_lights() {
     float x = 0.0f;
     for (int k = 0; k < 3; ++k) { if (l.color[k] > x) x = l.color[k]; if (l.feed_full[k] > x) x = l.feed_full[k]; }
     float fit = x * reach;   // what the plain match gives it
-    if (g_fit_lights && x > 0.0f) {
+    if (g_fit_lights && from_mission && x > 0.0f) {
       float axis[3] = { l.direction[0], l.direction[1], l.direction[2] };
       float axis_len = sqrtf(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
       bool cone = l.spot && axis_len > 0.5f && l.outer > -1.0f && l.outer < 1.0f;
@@ -1523,6 +1554,7 @@ static void submit_lights(const remixapi_Float3D& camera_pos) {
     g_light_built_color.clear();
     g_light_shown.clear();
     g_light_gain.clear();
+    g_baked_floor = -1.0f;
   }
   static float placed_for_scale = 0.0f;
   static bool placed_stand_off = true, placed_fit = true;
@@ -1753,9 +1785,22 @@ static const std::vector<Part>& parts_for(const ObjectDraw& d, bool glow_layer =
   uint64_t tex_hash = tex ? tex->hash : 0;
   key = fnv1a64(&tex_hash, sizeof tex_hash, key);
   key ^= d.alpha_test ? 0x9e3779b97f4a7c15ull : 0;
-  // The engine lights a surface with colour * (light + illumination): illumination 1 is a
-  // lamp face or a screen, bright whatever the lighting.
+  // A part the engine does not shade (a lamp face, a screen) is bright whatever the
+  // lighting: texture times the material's colour, and a dark colour is how the engine
+  // shows a lamp that is off. So its brightness here follows that colour, in linear light.
+  // A shaded part gets its material's "illumination" added to the light on it: at 1 it is
+  // as good as full-bright. (Models only: the level's shader does not read that value.)
   bool self_lit = d.unshaded || d.illumination >= 0.5f;
+  float object_tint = d.color[0] > d.color[1] ? (d.color[0] > d.color[2] ? d.color[0] : d.color[2]) : (d.color[1] > d.color[2] ? d.color[1] : d.color[2]);
+  object_tint = object_tint < 0.0f ? 0.0f : object_tint > 1.0f ? 1.0f : object_tint;
+  uint32_t object_tint_step = (uint32_t)(object_tint * 16.0f + 0.5f);
+  if (self_lit && object_tint_step == 0 && !lit_layer) self_lit = false;
+  // One the engine lays over what is behind by its alpha shows that much of itself.
+  if (self_lit && d.alpha_blend && d.color[3] < 0.99f) {
+    object_tint *= d.color[3] < 0.0f ? 0.0f : d.color[3];
+    object_tint_step = (uint32_t)(object_tint * 16.0f + 0.5f);
+  }
+  float object_lit = powf((float)object_tint_step / 16.0f, 2.2f);
   bool see_through = !glow_layer && !lit_layer && d.alpha_blend && d.color[3] < 0.99f;
   if (lit_layer) key ^= 0x4c49545f4f424a31ull;
   bool glass = see_through && as_glass;
@@ -1767,6 +1812,7 @@ static const std::vector<Part>& parts_for(const ObjectDraw& d, bool glow_layer =
     key ^= 0x5345455448525531ull;
   }
   key ^= self_lit ? 0x7f4a7c159e3779b9ull : 0;
+  if (self_lit || lit_layer) key = fnv1a64(&object_tint_step, sizeof object_tint_step, key);
   key ^= decal ? 0x4355544f55545f31ull : 0;
   if (glow_layer) {
     uint32_t q = (uint32_t)(d.glow_strength * kGlowSteps + 0.5f);
@@ -1807,13 +1853,14 @@ static const std::vector<Part>& parts_for(const ObjectDraw& d, bool glow_layer =
   }
   std::vector<Part> parts;
   // The glow layer is the same geometry again, as light added in proportion to the texture's alpha.
-  remixapi_MaterialHandle material = lit_layer  ? material_for(tex, false, d.color, true, kLit, 1.0f - g_emissive_light)
+  remixapi_MaterialHandle material = lit_layer  ? material_for(tex, false, d.color, true, kLit, (1.0f - g_emissive_light) * object_lit)
                                      : glass      ? glass_material(d.color[3])
                                      : see_through ? material_for(tex, false, d.color, self_lit, kSeeThrough)
-                                     : glow_layer ? material_for(tex, false, d.color, true, kGlow,
+                                     // (a glow whose texture has no see-through parts is pure added light, not a covering)
+                                     : glow_layer ? material_for(tex, false, d.color, true, tex && tex->has_mean && tex->mean_alpha > 0.9f ? kLit : kGlow,
                                                                  screen_strength((float)(uint32_t)(d.glow_strength * kGlowSteps + 0.5f) / kGlowSteps))
                                      : decal    ? material_for(tex, false, d.color, self_lit, kDecal)
-                                                : material_for(tex, d.alpha_test, d.color, self_lit, kSurface, self_lit ? g_emissive_light : 1.0f);
+                                                : material_for(tex, d.alpha_test, d.color, self_lit, kSurface, self_lit ? g_emissive_light * object_lit : 1.0f);
   for (auto& kv : groups) {
     Build& b = kv.second;
     remixapi_MeshInfoSurfaceTriangles t = {};
@@ -2198,9 +2245,13 @@ static void forget_scene_objects() {
 // it is only taken up once it has held for a while (it is a property of the level).
 static void follow_ambient() {
   const float* a = scene_ambient();
-  // An engine light value of x leaves a surface with radiance albedo * x / pi here (see LightScale).
-  float wanted = (0.2126f * a[0] + 0.7152f * a[1] + 0.0722f * a[2]) * g_ambient_scale / 3.14159265f;
-  wanted = floorf(wanted * 256.0f + 0.5f) / 256.0f;
+  // The floor the engine's lightmaps never go under, taken to linear light: a surface that
+  // gives off 0.32 of its colour shows at full brightness, so this much shows as the
+  // engine's ambient level. (The ambient the engine lights objects with is another number
+  // and can be far higher; it is not used for the level.)
+  float floor_level = g_baked_floor >= 0.0f ? g_baked_floor : 0.0f;
+  float wanted = 0.32f * powf(floor_level, 2.2f) * g_ambient_scale;
+  wanted = floorf(wanted * 65536.0f + 0.5f) / 65536.0f;
   static float candidate = -1.0f;
   static int held = 0;
   if (wanted == g_ambient_emissive) { held = 0; return; }
@@ -2221,10 +2272,13 @@ static void render_frame(double seconds) {
 
   setup_camera();
   scene_animate_lights(seconds);
-  submit_lights(g_camera_pos);
+  // Debug: Skip=<letters> leaves parts of the scene out (l lights, o objects, c characters),
+  // to find which of them something on screen comes from.
+  static const std::wstring skip = config_text(L"Skip");
+  if (skip.find(L'l') == std::wstring::npos) submit_lights(g_camera_pos);
   static const bool only_characters = config_text(L"Only") == L"characters";   // debug: hide everything else
-  if (!only_characters) submit_objects();
-  submit_characters();
+  if (!only_characters && skip.find(L'o') == std::wstring::npos) submit_objects();
+  if (skip.find(L'c') == std::wstring::npos) submit_characters();
   if (seconds - g_last_stats > 10.0) {
     g_last_stats = seconds;
     logf("remix: frame %llu: %zu object draws -> %zu instances (%zu see-through) + %zu glow layers (%zu translucent skipped, %zu kept from out of view), %zu character draws -> %zu, %zu models, %zu lights, %zu materials",

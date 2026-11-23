@@ -111,7 +111,8 @@ const MissionPolyLights& mission_poly_lights() { return g_poly_lights; }
 // The world chunk's cells, walked only for what says which animated lights have a lightmap
 // layer on which polygon. `kind`: 0 WR, 1 WRRGB, 2 WREXT; they differ in header, in the size
 // of a polygon's texturing record and in the bytes per lightmap texel.
-static void read_cells(const std::vector<unsigned char>& w, int kind) {
+// Returns where the cells end in the chunk, or 0.
+static size_t read_cells(const std::vector<unsigned char>& w, int kind) {
   g_poly_lights.first.clear();
   g_poly_lights.lights.clear();
   g_poly_lights.water.clear();
@@ -182,10 +183,11 @@ static void read_cells(const std::vector<unsigned char>& w, int kind) {
     g_poly_lights.first.clear();
     g_poly_lights.lights.clear();
     logf("mission: the level's cells could not be read; flashing lights will be replayed from their settings");
-    return;
+    return 0;
   }
   g_poly_lights.first.push_back((unsigned)g_poly_lights.lights.size());
   logf("mission: %u cells, %zu polygons, %zu lightmap layers of animated lights", cells, g_poly_lights.first.size() - 1, g_poly_lights.lights.size());
+  return p;
 }
 
 const std::vector<MissionLightAnim>& mission_light_anims() { return g_anims; }
@@ -359,6 +361,43 @@ bool mission_find_by_geometry(const std::vector<float>& vertices, std::vector<Mi
           return true;
         }
       }
+      // No animated light sits exactly where its object does (each hangs off its object by
+      // some offset), so there was no position to search for. The table lies somewhere
+      // after the cells: try every place for two plausible counts followed by records that
+      // put every animated light where its object says, give or take its offset.
+      size_t cells_end = read_cells(world, kind);
+      if (cells_end && !known.empty()) {
+        for (size_t h = cells_end; h + 8 + kRecord <= world.size(); ++h) {
+          unsigned num_static, num_dynamic;
+          memcpy(&num_static, &world[h], 4);
+          if (num_static == 0 || num_static > kMaxLights) continue;
+          memcpy(&num_dynamic, &world[h + 4], 4);
+          size_t start = h + 8;
+          if (num_dynamic > 64 || start + (size_t)num_static * kRecord > world.size()) continue;
+          unsigned agree = 0, asked = 0;
+          for (const Known& k : known) {
+            if ((unsigned)k.index >= num_static) { asked = ~0u; break; }
+            ++asked;
+            float q[3];
+            memcpy(q, &world[start + (size_t)k.index * kRecord], 12);
+            float dx = q[0] - k.position[0], dy = q[1] - k.position[1], dz = q[2] - k.position[2];
+            if (!(dx * dx + dy * dy + dz * dz <= k.slack * k.slack)) break;
+            ++agree;
+          }
+          if (asked == ~0u || agree != asked) continue;
+          out->resize(num_static);
+          memcpy(out->data(), &world[start], (size_t)num_static * kRecord);
+          read_anims(archive, e, inventory);
+          logf("mission: %s recognised by its geometry, %zu static lights (table found after the cells by all %u animated lights; %u missions in %.0f ms)",
+               source->c_str(), out->size(), agree, missions, now_ms() - t0);
+          return true;
+        }
+      }
+      g_poly_lights.first.clear();
+      g_poly_lights.lights.clear();
+      g_poly_lights.water.clear();
+      g_poly_lights.baked.clear();
+      g_poly_lights.layer.clear();
       logf("mission: %s recognised by its geometry, but its light table was not found from %zu animated lights", source->c_str(), known.size());
       return false;
     }

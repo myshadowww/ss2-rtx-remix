@@ -109,7 +109,7 @@ static void fail_once(const char* what) {
 static std::map<uint64_t, int> g_cached_texture_index;   // textures named in the level memory: hash -> record
 // Textures' rough average colours from earlier sessions (texture_means.txt beside the
 // texture cache), so that a texture only remembered, not yet drawn, has one too.
-struct RememberedMean { float rgb[3]; };
+struct RememberedMean { float rgb[3]; float alpha = 1.0f; };
 static std::map<uint64_t, RememberedMean> g_remembered_means;
 static bool g_means_loaded;
 
@@ -123,7 +123,7 @@ static void load_remembered_means() {
   while (fgets(line, sizeof line, f)) {
     unsigned long long hash = 0;
     RememberedMean m;
-    if (sscanf(line, "%llx %f %f %f", &hash, &m.rgb[0], &m.rgb[1], &m.rgb[2]) == 4) g_remembered_means[hash] = m;
+    if (sscanf(line, "%llx %f %f %f %f", &hash, &m.rgb[0], &m.rgb[1], &m.rgb[2], &m.alpha) == 5) g_remembered_means[hash] = m;   // older lines had no alpha: read again from the file
   }
   fclose(f);
 }
@@ -137,9 +137,9 @@ static const void* bound_texture_view(ID3D11DeviceContext* ctx) {
   return srv;
 }
 
-static int texture_for(ID3D11DeviceContext* ctx) {
+static int texture_for(ID3D11DeviceContext* ctx, UINT slot = 0) {
   ID3D11ShaderResourceView* srv = nullptr;
-  ctx->PSGetShaderResources(0, 1, &srv);
+  ctx->PSGetShaderResources(slot, 1, &srv);
   if (!srv) return -1;
   ID3D11Resource* res = nullptr;
   srv->GetResource(&res);
@@ -166,13 +166,15 @@ static int texture_for(ID3D11DeviceContext* ctx) {
     rec.uniform = info.uniform;
     rec.has_mean = info.has_mean;
     memcpy(rec.mean_rgb, info.mean_rgb, sizeof rec.mean_rgb);
+    rec.mean_alpha = info.mean_alpha;
     load_remembered_means();
     if (info.has_mean && !g_remembered_means.count(info.hash)) {
       RememberedMean m;
       memcpy(m.rgb, info.mean_rgb, sizeof m.rgb);
+      m.alpha = info.mean_alpha;
       g_remembered_means[info.hash] = m;
       FILE* f = _wfopen(means_file().c_str(), L"a");
-      if (f) { fprintf(f, "%016llx %.4f %.4f %.4f\n", (unsigned long long)info.hash, m.rgb[0], m.rgb[1], m.rgb[2]); fclose(f); }
+      if (f) { fprintf(f, "%016llx %.4f %.4f %.4f %.4f\n", (unsigned long long)info.hash, m.rgb[0], m.rgb[1], m.rgb[2], m.alpha); fclose(f); }
     }
     memcpy(rec.solid_rgba, info.solid_rgba, sizeof rec.solid_rgba);
     first_time_ever = !info.already_on_disk;
@@ -389,7 +391,17 @@ static void load_remembered_polygons() {
     rec.hash = hash;
     load_remembered_means();
     auto mean = g_remembered_means.find(hash);
-    if (mean != g_remembered_means.end()) { rec.has_mean = true; memcpy(rec.mean_rgb, mean->second.rgb, sizeof rec.mean_rgb); }
+    float rgba[4];
+    if (mean != g_remembered_means.end()) { rec.has_mean = true; memcpy(rec.mean_rgb, mean->second.rgb, sizeof rec.mean_rgb); rec.mean_alpha = mean->second.alpha; }
+    else if (dds_rough_mean(rec.path, rgba)) {   // not met since that list was started: from its file in the cache
+      rec.has_mean = true;
+      memcpy(rec.mean_rgb, rgba, sizeof rec.mean_rgb);
+      rec.mean_alpha = rgba[3];
+      RememberedMean m;
+      memcpy(m.rgb, rgba, sizeof m.rgb);
+      m.alpha = rgba[3];
+      g_remembered_means[hash] = m;
+    }
     int index = -1;
     if (GetFileAttributesW(rec.path.c_str()) != INVALID_FILE_ATTRIBUTES) {
       index = (int)g_textures.size();
@@ -630,6 +642,28 @@ static void capture_dynamic_lights(ID3D11DeviceContext* ctx) {
   res->Release();
 }
 
+// 0: not blended; 1: laid over by alpha; 2: added, scaled by alpha; 3: added as it is;
+// 4: replaces what is behind, scaled by alpha (a full-bright panel shown dimmed);
+// 5: multiplies what is behind.
+static int blend_kind(ID3D11DeviceContext* ctx) {
+  ID3D11BlendState* blend = nullptr;
+  FLOAT factor[4];
+  UINT mask = 0;
+  ctx->OMGetBlendState(&blend, factor, &mask);
+  if (!blend) return 0;
+  D3D11_BLEND_DESC bd;
+  blend->GetDesc(&bd);
+  blend->Release();
+  const auto& rt = bd.RenderTarget[0];
+  if (!rt.BlendEnable) return 0;
+  if (rt.SrcBlend == D3D11_BLEND_SRC_ALPHA && rt.DestBlend == D3D11_BLEND_INV_SRC_ALPHA) return 1;
+  if (rt.SrcBlend == D3D11_BLEND_SRC_ALPHA && rt.DestBlend == D3D11_BLEND_ONE) return 2;
+  if (rt.SrcBlend == D3D11_BLEND_ONE && rt.DestBlend == D3D11_BLEND_ONE) return 3;
+  if (rt.SrcBlend == D3D11_BLEND_SRC_ALPHA && rt.DestBlend == D3D11_BLEND_ZERO) return 4;
+  if ((rt.SrcBlend == D3D11_BLEND_ZERO && rt.DestBlend == D3D11_BLEND_SRC_COLOR) || (rt.SrcBlend == D3D11_BLEND_DEST_COLOR && rt.DestBlend == D3D11_BLEND_ZERO)) return 5;
+  return 0;
+}
+
 static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base_vertex, const ShaderRecord* ps) {
   ID3D11Buffer* vb = nullptr;
   ID3D11Buffer* ib = nullptr;
@@ -672,6 +706,7 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
     WorldRange& r = known->second;
     if (r.seen_frame != g_frame) {   // its first pass in this frame
       r.seen_frame = g_frame;
+      if (r.water_surface) return;   // water's first pass is a ripple layer, not its surface
       const void* view = bound_texture_view(ctx);
       if (view == r.last_view) return;
       // The texture bound is not the one we last saw here. Either this polygon came from
@@ -684,10 +719,22 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
       if (confirming) {
         WorldRange now;
         read_polygon_constants(ctx, now);
-        if (now.unshaded != r.unshaded || (now.illumination >= 0.5f) != (r.illumination >= 0.5f)) {
+        if (now.unshaded != r.unshaded) {
           r.unshaded = now.unshaded;
           r.illumination = now.illumination;
           remember_flags(r);
+          rebuild = true;
+        }
+        // Drawn over what is behind by its alpha (grid lines on nothing): a cut-out. Drawn
+        // scaled by its alpha with nothing kept from behind: that much dimmer.
+        int kind = blend_kind(ctx);
+        r.base_blend = (uint8_t)kind;
+        bool cut_out = r.alpha_test || kind == 1;
+        if (kind == 4) for (int k = 0; k < 3; ++k) now.color[k] *= now.color[3];
+        if (cut_out != r.alpha_test || memcmp(now.color, r.color, sizeof r.color) != 0) {
+          r.alpha_test = cut_out;
+          memcpy(r.color, now.color, sizeof r.color);
+          remember_polygon(r);
           rebuild = true;
         }
       }
@@ -729,7 +776,38 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
       additive = rt.BlendEnable && rt.SrcBlend == D3D11_BLEND_SRC_ALPHA && rt.DestBlend == D3D11_BLEND_ONE;
       blend->Release();
     }
-    if (!layered && !additive) return;
+    if (!layered && !additive) {
+      // Water, and the walls round a pool, are drawn as layers with no solid one under
+      // them: a faint ripple added first, the surface's own texture added last. That last
+      // one is the surface.
+      // And some walls are a plain white pass (which takes the lighting) multiplied by the
+      // wall's texture in a second one: there the second is the surface.
+      int kind = blend_kind(ctx);
+      bool white_base = r.texture >= 0 && g_textures[r.texture].has_mean && g_textures[r.texture].mean_rgb[0] > 0.9f && g_textures[r.texture].mean_rgb[1] > 0.9f &&
+                        g_textures[r.texture].mean_rgb[2] > 0.9f;
+      if ((kind == 3 && (r.unshaded || r.base_blend == 2 || r.base_blend == 3 || scene_water_at(r.start))) || (kind == 5 && white_base && !r.unshaded)) {
+        WorldRange now;
+        read_polygon_constants(ctx, now);
+        int t = texture_for(ctx);
+        bool usable = t >= 0 && !g_textures[t].uniform && !g_textures[t].solid && (r.texture < 0 || g_textures[t].hash != g_textures[r.texture].hash);
+        if (kind == 5 && usable && g_textures[t].width < 16) usable = false;   // a gradient strip, not a wall
+        if ((kind == 5 || !now.unshaded) && usable) {
+          r.texture = t;
+          r.last_view = nullptr;   // the first pass binds another texture: do not take that for a change
+          r.unshaded = false;
+          r.illumination = 0.0f;
+          memcpy(r.color, now.color, sizeof r.color);
+          memcpy(r.scale, now.scale, sizeof r.scale);
+          memcpy(r.uv_matrix, now.uv_matrix, sizeof r.uv_matrix);
+          compute_polygon_uv(r);
+          r.water_surface = true;
+          ++g_world.revision;
+          static unsigned adopted = 0;
+          if (++adopted == 1 || adopted % 50 == 0) logf("scene: %u level polygons take their surface from a texture of a later pass (water, pool-side walls, walls drawn as white times texture)", adopted);
+        }
+      }
+      return;
+    }
     if (additive && r.glow_texture >= 0) {
       // Known glow layer: follow its brightness, which the engine pulses on some screens.
       // A polygon may have two additive passes; the stronger one of a frame counts.
@@ -757,7 +835,7 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
     } else {
       const float* c = constants.color;
       float strength = c[3] * (c[0] > c[1] ? (c[0] > c[2] ? c[0] : c[2]) : (c[1] > c[2] ? c[1] : c[2]));
-      if (!(constants.unshaded || constants.illumination >= 0.5f) || strength < 0.05f) return;
+      if (!constants.unshaded || strength < 0.05f) return;   // (the material's "illumination" is not read by any of the engine's shaders)
       r.glow_texture = t;
       r.glow_strength = strength;
       r.glow_frame = g_frame;
@@ -776,13 +854,15 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
   range.last_view = bound_texture_view(ctx);
   range.count = count;
   range.texture = texture_for(ctx);
-  range.alpha_test = ps && ps->alpha_test;
+  range.base_blend = (uint8_t)blend_kind(ctx);
+  range.alpha_test = (ps && ps->alpha_test) || range.base_blend == 1;   // laid over what is behind by its alpha: a cut-out
   read_polygon_constants(ctx, range);
+  if (range.base_blend == 4) for (int k = 0; k < 3; ++k) range.color[k] *= range.color[3];   // shown scaled by its alpha: that much dimmer
   compute_polygon_uv(range);
   g_world.ranges[start] = range;
   ++g_world.revision;
   remember_polygon(range);
-  if (range.unshaded || range.illumination >= 0.5f) remember_flags(range);
+  if (range.unshaded) remember_flags(range);
 }
 
 static int model_for(ID3D11DeviceContext* ctx, ID3D11Buffer* vb, ID3D11Buffer* ib, DXGI_FORMAT ib_format) {
@@ -941,6 +1021,46 @@ static void on_object_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT
         memcpy(&shade, material + 80, 4);
         d.unshaded = shade == 0;
         memcpy(&d.illumination, material + 64, 4);
+        // The engine also multiplies by an "incidence" colour, looked up in a small map by
+        // the angle and distance it is seen from: how a light panel is bright close up and
+        // dark from along the corridor. Here the map's average stands for it; the same for
+        // the incidence alpha. (+92 alpha map on, +100 colour map on; the maps are the
+        // textures bound after the engine's light buffers.)
+        if (material_size >= 104) {
+          int alpha_map = 0, colour_map = 0;
+          memcpy(&alpha_map, material + 92, 4);
+          memcpy(&colour_map, material + 100, 4);
+          if (alpha_map == 1 || colour_map == 1) {
+            int maps[2] = { -1, -1 }, found = 0;
+            for (UINT slot = 1; slot < 10 && found < 2; ++slot) {
+              ID3D11ShaderResourceView* srv = nullptr;
+              ctx->PSGetShaderResources(slot, 1, &srv);
+              if (!srv) continue;
+              ID3D11Resource* res = nullptr;
+              srv->GetResource(&res);
+              srv->Release();
+              D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+              bool plain = false;
+              if (res) {
+                res->GetType(&dim);
+                if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {   // not the cube map that shares these slots
+                  D3D11_TEXTURE2D_DESC td;
+                  static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
+                  plain = td.ArraySize == 1;
+                }
+                res->Release();
+              }
+              if (plain) maps[found++] = texture_for(ctx, slot);
+            }
+            int a = alpha_map == 1 ? maps[0] : -1, c = colour_map == 1 ? (alpha_map == 1 ? maps[1] : maps[0]) : -1;
+            if (c >= 0 && g_textures[c].has_mean) for (int k = 0; k < 3; ++k) d.color[k] *= g_textures[c].mean_rgb[k];
+            if (a >= 0 && g_textures[a].has_mean) d.color[3] *= g_textures[a].mean_rgb[0];
+            static int told = 0;
+            if (told < 6 && (a >= 0 || c >= 0) && ++told)
+              logf("scene: an object part with incidence maps (alpha %d, colour %d; maps %ux%u mean known %d): colour now %.2f %.2f %.2f %.2f", alpha_map, colour_map,
+                   g_textures[a >= 0 ? a : c].width, g_textures[a >= 0 ? a : c].height, (int)g_textures[a >= 0 ? a : c].has_mean, d.color[0], d.color[1], d.color[2], d.color[3]);
+          }
+        }
       }
       ID3D11BlendState* blend = nullptr;
       FLOAT blend_factor[4];
@@ -977,8 +1097,11 @@ static void on_object_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT
           bool this_flat = d.texture < 0 || g_textures[d.texture].solid;
           // A blended, self-lit repeat is the surface's glow: bright where the texture's
           // alpha says so, on top of the normally lit surface.
+          // (Not one whose texture is see-through nearly everywhere: the engine scales the
+          // layer by that alpha, so it adds next to nothing, whatever colour the texture holds.
+          // The wall light panels of the Ops deck's dark corridors are such.)
           bool lit_layer = (d.additive || d.alpha_blend) && (d.unshaded || d.illumination > 0.5f) && d.texture >= 0 && !g_textures[d.texture].solid &&
-                           !g_textures[d.texture].uniform && !prev->blended;
+                           !g_textures[d.texture].uniform && !prev->blended && !(g_textures[d.texture].has_mean && g_textures[d.texture].mean_alpha < 0.03f);
           if (lit_layer) {
             const float* c = d.color;
             float strength = c[3] * (c[0] > c[1] ? (c[0] > c[2] ? c[0] : c[2]) : (c[1] > c[2] ? c[1] : c[2]));
@@ -1259,6 +1382,7 @@ ID3D11Texture2D* scene_world_target() { return g_world_target_frame == g_frame ?
 // of entries starts; the mission file says which light each layer of each polygon is. The
 // two are only trusted if they agree on the layer count of practically every polygon.
 const BakedLight& scene_baked_light() { return g_baked; }
+bool scene_lights_from_mission() { return g_mission_lights; }
 
 int scene_water_at(uint32_t start) {
   if (g_water.empty() || start >= g_world.indices.size()) return 0;

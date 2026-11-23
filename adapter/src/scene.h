@@ -20,6 +20,7 @@ struct SceneTexture {
   bool uniform = false;            // blank: one transparent block repeated (an empty layer)
   bool has_mean = false;           // a rough average colour is known (not for textures only remembered from an earlier run)
   float mean_rgb[3] = { 0.5f, 0.5f, 0.5f };
+  float mean_alpha = 1.0f;         // near 1: an opaque texture; low: mostly see-through (a mask, or a faint layer)
 };
 
 // One world polygon as the engine draws it: a run of indices with one texture.
@@ -27,6 +28,8 @@ struct WorldRange {
   uint32_t start = 0, count = 0;
   int texture = -1;        // index into scene_textures(), -1 if none
   bool alpha_test = false;
+  bool water_surface = false;        // its texture was taken from the water's own (added) pass; the first pass must not replace it
+  uint8_t base_blend = 0;            // how its first pass is blended (see blend_kind() in scene.cpp); 0 when only remembered
   float color[4] = { 1, 1, 1, 1 };   // DarkMaterialConstants.Color
   float scale[2] = { 1, 1 };         // DarkNewParams.uTerrainScale at the time it was drawn
   float uv_matrix[12] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
@@ -230,6 +233,7 @@ struct BakedLight {
   std::vector<BakedLayer> layers;
 };
 const BakedLight& scene_baked_light();
+bool scene_lights_from_mission();   // false while the lights are only those met in the engine's per-object lists
 
 // 0, or what the level polygon whose indices start at `start` is by the mission file: 1 a
 // water surface seen from the air, 2 one seen from under the water.

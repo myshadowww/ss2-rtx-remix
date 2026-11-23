@@ -77,9 +77,9 @@ ScreenEmissive=0.4
 ; How much of a lamp face's or screen's brightness it also casts as light (0 to 1). The
 ; engine's cast none; 1 lets them light their rooms fully.
 EmissiveLight=0.15
-; How much of the engine's ambient light ordinary surfaces give off. 0 is off; above that,
-; closed pale rooms brighten a lot, because the light bounces.
-AmbientScale=0
+; The engine never leaves a surface darker than its ambient level; path traced, a corner no
+; lamp reaches would be black. 1: surfaces give off that floor themselves. 0: off.
+AmbientFloor=1
 ; DLSS mode. auto: full resolution up to 1200 lines of output, Remix's own choice above.
 ; conf: whatever rtx.conf says. 0-5: force (0 ultra performance, 3 quality, 5 full resolution).
 Dlss=auto
