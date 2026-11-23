@@ -114,6 +114,7 @@ const MissionPolyLights& mission_poly_lights() { return g_poly_lights; }
 static void read_cells(const std::vector<unsigned char>& w, int kind) {
   g_poly_lights.first.clear();
   g_poly_lights.lights.clear();
+  g_poly_lights.water.clear();
   auto u32 = [&](size_t at) { unsigned v = 0; if (at + 4 <= w.size()) memcpy(&v, &w[at], 4); return v; };
   size_t p = kind == 2 ? 28 : 8;
   unsigned cells = u32(kind == 2 ? 24 : 4);
@@ -122,7 +123,8 @@ static void read_cells(const std::vector<unsigned char>& w, int kind) {
   bool ok = w.size() > p && cells > 0 && cells < 100000;
   for (unsigned c = 0; c < cells && ok; ++c) {
     if (p + 31 > w.size()) { ok = false; break; }
-    unsigned vertices = w[p], polys = w[p + 1], render_polys = w[p + 2], planes = w[p + 4], anim_lights = w[p + 13];
+    unsigned vertices = w[p], polys = w[p + 1], render_polys = w[p + 2], portals = w[p + 3], planes = w[p + 4], medium = w[p + 5], anim_lights = w[p + 13];
+    unsigned solid = polys >= portals ? polys - portals : polys;   // the polygons after these are openings to other cells
     p += 31 + 12 * (size_t)vertices + 8 * (size_t)polys + render_poly * render_polys;
     if (p + 4 > w.size()) { ok = false; break; }
     p += 4 + (size_t)u32(p) + 16 * (size_t)planes;
@@ -136,6 +138,7 @@ static void read_cells(const std::vector<unsigned char>& w, int kind) {
       unsigned height = info[6], width = info[7], flags;
       memcpy(&flags, info + 16, 4);
       g_poly_lights.first.push_back((unsigned)g_poly_lights.lights.size());
+      g_poly_lights.water.push_back(i >= solid ? (medium == 2 ? 2 : 1) : 0);
       unsigned layers = 0;
       for (unsigned b = 0; b < 32; ++b) {
         if (!(flags >> b & 1)) continue;
@@ -198,6 +201,7 @@ static void read_anims(const std::wstring& archive, const KpfEntry& e, const std
 bool mission_find_lights(const std::vector<float>& anchors, std::vector<MissionLight>* out, std::string* source) {
   g_poly_lights.first.clear();
   g_poly_lights.lights.clear();
+  g_poly_lights.water.clear();
   static_assert(sizeof(MissionLight) == kRecord, "light record layout");
   double t0 = now_ms();
   unsigned missions = 0;
@@ -240,6 +244,7 @@ bool mission_find_lights(const std::vector<float>& anchors, std::vector<MissionL
 bool mission_find_by_geometry(const std::vector<float>& vertices, std::vector<MissionLight>* out, std::string* source) {
   g_poly_lights.first.clear();
   g_poly_lights.lights.clear();
+  g_poly_lights.water.clear();
   if (vertices.size() < 9) return false;
   double t0 = now_ms();
   unsigned missions = 0;

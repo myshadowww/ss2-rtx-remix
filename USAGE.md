@@ -85,7 +85,14 @@ variables override it):
 | `EmissiveLight` | 0.15 | how much of a lamp face's or screen's brightness it also casts as light; the engine's cast none, 1 lets them light their rooms fully |
 | `AmbientScale` | 0 | how much of the engine's ambient light ordinary surfaces give off; off by default because that light bounces and floods closed pale rooms |
 | `LiveLights` | 1 | flashing, flickering and switched lights follow the engine's own value each frame (or replay their rhythm from the mission file where that is not to be had); 0: every light steady at its table value |
+| `FitLights` | 1 | fit each light's strength to the room it lights, where a plain match at five units leaves corridors too bright and big rooms too dark; costs about half a second when a level loads |
 | `StandOff` | 1 | move lights that sit close to a wall a little way out from it, so the wall gets a soft glow as in the engine, not a small bright disc |
+| `Sprites` | 1 | put the engine's particles, sparks and coronas into the path-traced scene (they are drawn before the point where the path-traced image replaces the engine's, so otherwise they are lost) |
+| `Water` | 1 | water surfaces, which the mission file marks: 0 as the engine textures them, 1 the same but mirror-smooth so they reflect, 2 a see-through tinted skin |
+| `Look` | `engine` | `engine`: the engine's brightness, no tone mapping; `engine-tonemapped`: the same brightness through Remix's local tone mapper; `remix`: Remix's own auto exposure and tone mapping; `custom`: whatever the next three say |
+| `ToneMapping` | `off` | `off`, `local` (Remix's local tone mapper, filmic) or `global` (Remix's global curve, which follows the view) |
+| `AutoExposure` | 0 | let Remix adapt brightness to what is on screen |
+| `Exposure` | 1.65 | in stops; with auto exposure off 1.65 is the engine's brightness under every tone mapping, with it on 0 is Remix's default |
 | `Sky` | 1 | send the engine's sky box to the path tracer, so windows show the stars and the Earth |
 | `FollowEngineLights` | 0 | also take each light's brightness from the engine's per-object lists; off because those values are what reaches one object (zero in its shadow), which made lights switch with the view |
 | `KeepObjects` | 1 | keep still objects in the path-traced scene after they leave the view (the engine stops drawing them); 0: only what the engine draws |
@@ -155,6 +162,7 @@ it with the game running; expect one slow frame while everything is rebuilt.
     python3 tools/tour.py off
     python3 tools/tour.py medsci2 --at=-12,-190,2,0        # ...with the player put at that spot, facing 0 degrees
     python3 tools/survey.py medsci2 -12,-190,2,0 icu       # same four views path traced and engine, into run/survey/
+    python3 tools/steam_game_running.py && echo "the Steam copy is running"
     python3 tools/sweep.py                                 # all 23 missions path-traced, results in run/sweep/
 
     python3 regress.py --update                            # store screenshots as the baseline
@@ -170,20 +178,25 @@ anything heavy on the disk at the same time: the menu keys are timed.
 - The path-traced image goes in at the engine's first post-process draw of the frame
   (ambient occlusion, bloom, anti-aliasing or colour correction). With every one of those
   turned off in the game's settings there is nothing to hook, and the engine's image shows.
-- Sprites the engine draws inside the world pass (particles, coronas) are missing from
-  the path-traced image; the adapter's log says how many there were.
+- Particles and sparks are in the path-traced scene as glowing or blended quads, one
+  colour a batch. `Sprites=0` leaves them out.
+- After path tracing is switched back on (Scroll Lock) the picture is dim for about a
+  second while Remix converges.
 - The sky is the engine's own box and textures, shown at the engine's brightness; it
-  lights nothing to speak of. `Sky=0` in `ss2rtx.ini` leaves it out. Water is a flat
-  textured surface, as the engine draws it.
+  lights nothing to speak of. `Sky=0` in `ss2rtx.ini` leaves it out. Water is the
+  engine's texture made mirror-smooth, or a see-through skin (`Water`); neither bends
+  light.
 - Path-traced rooms are lit by bounced light as well, so walls near a lit floor are
   brighter than the engine's; screens and lamps light what is around them.
 - Flashing, flickering and switched lights take their brightness from the engine every
   frame, when the mission file's cells can be tied to the level (the log says "N animated
   lights take their brightness from the engine"). A light that reaches no level surface
   replays its rhythm from the file instead.
-- Lights fall off with the square of the distance (the engine's: with the distance). To
-  keep a lamp from burning a small bright disc into the wall it hangs on, lights close to
-  a wall are moved a little way out from it (at most 1.2 units; `StandOff=0` or the F11
-  row turns that off). Overall brightness matches the engine; F11, Exposure, changes it.
+- Lights fall off with the square of the distance (the engine's: with the distance). Each
+  light's strength is fitted to its room, and lights close to a wall are moved a little
+  way out from it (two units at most) so the wall gets a glow, not a small bright disc.
+  Measured against the engine in the same views: corridors within about 15%, on the dark
+  side; large rooms (the station's hangar) only 60 to 75% as bright; and the engine's
+  coloured lights tint walls more strongly. F11, exposure, changes the overall level.
 - Every mission loads and renders (`tools/sweep.py`), but each was only looked at from
   its start position.

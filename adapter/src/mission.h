@@ -34,6 +34,9 @@ struct MissionLightAnim {
 struct MissionPolyLights {
   std::vector<unsigned> first;
   std::vector<unsigned short> lights;
+  // Per polygon: 0, or what a textured opening between two cells is, which in this game
+  // is always a water surface: 1 seen from the air, 2 seen from under the water.
+  std::vector<unsigned char> water;
 };
 const MissionPolyLights& mission_poly_lights();
 

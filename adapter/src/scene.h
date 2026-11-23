@@ -217,7 +217,26 @@ const World& scene_world();
 const std::vector<SceneTexture>& scene_textures();
 const Camera& scene_camera();
 const std::vector<ModelMesh>& scene_models();
+// 0, or what the level polygon whose indices start at `start` is by the mission file: 1 a
+// water surface seen from the air, 2 one seen from under the water.
+int scene_water_at(uint32_t start);
+
 const std::vector<ObjectDraw>& scene_frame_objects();   // cleared by scene_frame_end()
+
+// A batch of the engine's world-space quads (particles, sparks, coronas) drawn inside the
+// world pass of this frame, in world space. The engine draws them after the level and the
+// objects and before its post-processing, which is where the path-traced image replaces
+// the world, so they have to be in the path-traced scene to be seen.
+struct SpriteVertex { float position[3]; float uv[2]; uint8_t rgba[4]; };
+struct SpriteDraw {
+  int texture = -1;
+  bool additive = false;     // added to what is behind it; else blended over it by alpha
+  bool by_alpha = false;     // an additive one whose shape is in its texture's alpha (source factor: alpha)
+  bool alpha_test = false;
+  std::vector<SpriteVertex> vertices;
+  std::vector<uint32_t> indices;
+};
+const std::vector<SpriteDraw>& scene_frame_sprites();   // cleared by scene_frame_end()
 const std::vector<float>& scene_frame_nodes();          // column-major 4x4 matrices
 const std::vector<SkinnedMesh>& scene_skinned_models();
 const std::vector<SkinnedDraw>& scene_frame_skinned();   // cleared by scene_frame_end()

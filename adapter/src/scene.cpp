@@ -48,6 +48,7 @@ static bool g_mission_lights;          // g_lights now holds the mission's full 
 static std::vector<float> g_anim_values;
 static int g_anim_slot = -1;
 static size_t g_anim_entries;     // how many entries the level's polygons use
+static std::vector<unsigned char> g_water;   // per polygon number, from the mission file; empty when unknown
 static bool g_mission_geometry_tried;   // the by-geometry lookup has run for this level
 static unsigned g_lights_generation;
 static unsigned g_mission_attempts;
@@ -188,6 +189,7 @@ static bool load_level(ID3D11DeviceContext* ctx, ID3D11Buffer* vb, ID3D11Buffer*
   g_anim_entries = 0;
   g_anim_slot = -1;
   g_anim_values.clear();
+  g_water.clear();
   ++g_lights_generation;
   g_mission_attempts = 0;
   g_mission_tried_with = 0;
@@ -1105,8 +1107,108 @@ static void on_skinned_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, IN
   for (auto* b : { light_buf, cmd_buf, node_buf, offset_buf }) if (b) b->Release();
 }
 
+// The engine's world-space quads: position, texture coordinate and colour per vertex (24
+// bytes), drawn with the frame's own projection when they belong to the world (the HUD
+// uses the same shader with a flat projection). Kept only while the world pass is under
+// way, into the world's render target.
+static std::vector<SpriteDraw> g_frame_sprites;
+static size_t g_frame_sprite_vertices;
+
+static void on_sprite_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base_vertex, const ShaderRecord* ps) {
+  if (g_camera_frame != g_frame || !g_camera.valid || g_world_target_frame != g_frame || count < 3 || count > 60000) return;
+  if (g_frame_sprite_vertices > 200000) return;
+  ID3D11RenderTargetView* rtv = nullptr;
+  ctx->OMGetRenderTargets(1, &rtv, nullptr);
+  if (!rtv) return;
+  ID3D11Resource* target = nullptr;
+  rtv->GetResource(&target);
+  rtv->Release();
+  bool in_world = target == g_world_target;
+  if (target) target->Release();
+  if (!in_world) return;
+
+  ID3D11Buffer* cb = nullptr;
+  ctx->VSGetConstantBuffers(0, 1, &cb);
+  std::vector<uint8_t> s0, s1, s2;
+  const uint8_t* view_data = nullptr;
+  size_t view_size = 0;
+  float proj[16], mv[16];
+  bool ok = cb && buffer_bytes(ctx, cb, &view_data, &view_size, &s0) && view_size >= 128;
+  if (ok) { memcpy(proj, view_data, 64); memcpy(mv, view_data + 64, 64); }
+  if (cb) cb->Release();
+  if (!ok) return;
+  for (int i = 0; i < 16; ++i)   // another projection: a flat overlay, not part of the world
+    if (fabsf(proj[i] - g_camera.proj[i]) > 1e-3f * (1.0f + fabsf(g_camera.proj[i]))) return;
+
+  ID3D11Buffer* vb = nullptr;
+  ID3D11Buffer* ib = nullptr;
+  UINT stride = 0, offset = 0, ib_offset = 0;
+  DXGI_FORMAT ib_format = DXGI_FORMAT_UNKNOWN;
+  ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
+  ctx->IAGetIndexBuffer(&ib, &ib_format, &ib_offset);
+  const uint8_t *vdata = nullptr, *idata = nullptr;
+  size_t vsize = 0, isize = 0;
+  ok = vb && ib && stride == 24 && buffer_bytes(ctx, vb, &vdata, &vsize, &s1) && buffer_bytes(ctx, ib, &idata, &isize, &s2);
+  if (vb) vb->Release();
+  if (ib) ib->Release();
+  if (!ok) { fail_once("world-space quad draw with an unexpected buffer layout; left out"); return; }
+  size_t index_size = ib_format == DXGI_FORMAT_R16_UINT ? 2 : 4;
+  if ((size_t)ib_offset + ((size_t)start + count) * index_size > isize) return;
+
+  SpriteDraw d;
+  d.texture = texture_for(ctx);
+  d.alpha_test = ps && ps->alpha_test;
+  ID3D11BlendState* blend = nullptr;
+  FLOAT factor[4];
+  UINT mask = 0;
+  ctx->OMGetBlendState(&blend, factor, &mask);
+  bool blended = false;
+  if (blend) {
+    D3D11_BLEND_DESC bd;
+    blend->GetDesc(&bd);
+    blended = bd.RenderTarget[0].BlendEnable != 0;
+    d.additive = blended && bd.RenderTarget[0].DestBlend == D3D11_BLEND_ONE;
+    d.by_alpha = d.additive && bd.RenderTarget[0].SrcBlend == D3D11_BLEND_SRC_ALPHA;
+    blend->Release();
+  }
+  if (!blended && !d.alpha_test) d.alpha_test = true;   // an opaque quad: its texture's cut-out is all there is to go by
+
+  // To world space: through this draw's model-view, then back out of the frame's view.
+  const float* v = g_camera.view;
+  std::map<uint32_t, uint32_t> remap;
+  size_t vertex_count = (vsize - (offset < vsize ? offset : vsize)) / 24;
+  for (UINT i = 0; i < count - count % 3; ++i) {
+    uint32_t vi = 0;
+    if (index_size == 2) { uint16_t x; memcpy(&x, idata + ib_offset + ((size_t)start + i) * 2, 2); vi = x; }
+    else memcpy(&vi, idata + ib_offset + ((size_t)start + i) * 4, 4);
+    int64_t at = (int64_t)vi + base_vertex;
+    if (at < 0 || (size_t)at >= vertex_count) { d.indices.clear(); break; }
+    auto found = remap.find((uint32_t)at);
+    if (found == remap.end()) {
+      const uint8_t* src = vdata + offset + (size_t)at * 24;
+      float p[3];
+      memcpy(p, src, 12);
+      float e[3];
+      for (int r = 0; r < 3; ++r) e[r] = mv[r] * p[0] + mv[4 + r] * p[1] + mv[8 + r] * p[2] + mv[12 + r] - v[12 + r];
+      SpriteVertex out;
+      for (int c = 0; c < 3; ++c) out.position[c] = v[c * 4] * e[0] + v[c * 4 + 1] * e[1] + v[c * 4 + 2] * e[2];
+      memcpy(out.uv, src + 12, 8);
+      memcpy(out.rgba, src + 20, 4);
+      found = remap.emplace((uint32_t)at, (uint32_t)d.vertices.size()).first;
+      d.vertices.push_back(out);
+    }
+    d.indices.push_back(found->second);
+  }
+  if (d.indices.size() < 3) return;
+  g_frame_sprite_vertices += d.vertices.size();
+  g_frame_sprites.push_back(std::move(d));
+}
+
+const std::vector<SpriteDraw>& scene_frame_sprites() { return g_frame_sprites; }
+
 void scene_on_draw_indexed(ID3D11DeviceContext* ctx, const ShaderRecord* vs, const ShaderRecord* ps, UINT count, UINT start, INT base_vertex) {
   if (!g_dev || ctx != g_ctx || !vs) return;
+  if (vs->cls == ShaderClass::WorldSpace) { if (g_world.loaded) on_sprite_draw(ctx, count, start, base_vertex, ps); return; }
   if (vs->cls == ShaderClass::Sky) { if (g_world.loaded) on_sky_draw(ctx, count, start); return; }
   if (vs->cls == ShaderClass::WorldRep) on_world_draw(ctx, count, start, base_vertex, ps);
   else if (vs->cls == ShaderClass::MDModel && g_world.loaded) on_object_draw(ctx, count, start, base_vertex, ps);
@@ -1120,6 +1222,14 @@ ID3D11Texture2D* scene_world_target() { return g_world_target_frame == g_frame ?
 // carries its polygon's number, how many animated layers the polygon has and where its run
 // of entries starts; the mission file says which light each layer of each polygon is. The
 // two are only trusted if they agree on the layer count of practically every polygon.
+int scene_water_at(uint32_t start) {
+  if (g_water.empty() || start >= g_world.indices.size()) return 0;
+  uint32_t vi = g_world.indices[start];
+  if (vi >= g_world.vertices.size()) return 0;
+  uint32_t poly = g_world.vertices[vi].flags & 0x7FFFF;
+  return poly < g_water.size() ? g_water[poly] : 0;
+}
+
 static void connect_light_feeds(const std::vector<int>& scene_index) {
   const MissionPolyLights& file = mission_poly_lights();
   g_anim_entries = 0;
@@ -1147,6 +1257,16 @@ static void connect_light_feeds(const std::vector<int>& scene_index) {
     }
   }
   bool trusted = checked > 0 && agree * 1000 >= checked * 995 && layered > 0;
+  g_water.clear();
+  if (trusted && file.water.size() == polys) {
+    size_t surfaces = 0;
+    for (unsigned char kind : file.water) surfaces += kind != 0;
+    if (surfaces) {
+      g_water = file.water;
+      ++g_world.revision;   // the level mesh is built again with them marked
+      logf("scene: %zu water surface polygons in this level", surfaces);
+    }
+  }
   if (trusted) {
     for (auto& pick : picks)
       if (pick.first->feed < 0) { pick.first->feed = pick.second; ++connected; }
@@ -1332,6 +1452,8 @@ void scene_frame_end() {
     g_ambient_count = 0;
   }
   ++g_frame;
+  g_frame_sprites.clear();
+  g_frame_sprite_vertices = 0;
   g_frame_objects.clear();
   g_frame_nodes.clear();
   g_frame_skinned.clear();

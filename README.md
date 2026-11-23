@@ -22,14 +22,18 @@ your own download of the Remix runtime; neither is in this repository.
 - The level's lights, read from the mission file the game has loaded (recognised by the
   level's geometry), including spotlights; flashing, flickering and switched lights follow
   the engine's own per-frame values; muzzle flashes and other moving lights.
-- Brightness that matches the engine's: the same views rendered both ways come out within
-  a few percent of each other in mean brightness.
+- Brightness close to the engine's in corridors and ordinary rooms: the same views
+  rendered both ways are within about 15% in mean level, on the dark side. (Large rooms
+  are darker than the engine's; see below.)
+- Particles and sparks; water surfaces (mirror-smooth, or a see-through skin).
 - Screens, lit signs, glow layers, decals, see-through surfaces, the sky box through
   windows.
 - The game's HUD, weapon, menus, saves and input, untouched.
 - An in-game settings panel (F11): path tracing on/off, upscaler and DLSS mode, ray
-  reconstruction, DLSS neural rendering, indirect light mode, bounces, exposure, bloom and
-  the adapter's own light levels. Scroll Lock switches between path traced and the
+  reconstruction, DLSS neural rendering, indirect light mode, bounces, the look (the
+  engine's brightness, the same through Remix's tone mapper, or Remix's own, with tone
+  mapping, auto exposure and exposure as separate rows), bloom and the adapter's own
+  light levels. Changing the resolution in the game's options works while path tracing. Scroll Lock switches between path traced and the
   engine's renderer at any time.
 - A material override table (`ss2rtx/materials.txt`, reloaded live) for roughness,
   metalness, normal and height maps per texture.
@@ -44,35 +48,30 @@ DLSS Performance. The game stays at its 120 fps cap at 720p and 1080p.
 
 ## What does not
 
-- Particles and other sprites the engine draws inside its world pass are missing from
-  the path-traced image.
-- Water is the engine's flat textured surface: no refraction.
-- Lights fall off with the square of the distance, the engine's with the distance. They
-  are matched at five game units and lights close to a wall are moved a little way out
-  from it, so nearby surfaces match; far ones are dimmer than the engine's and rely on
-  bounced light.
+- Lights fall off with the square of the distance, the engine's with the distance. Each
+  light's strength is fitted to the room it lights and lights close to a wall are moved a
+  little way out from it. That holds for corridors; large rooms come out at 60 to 75% of
+  the engine's brightness, and the engine's coloured lights tint walls more strongly than
+  the path-traced picture does.
+- Water does not bend light: it is the engine's texture made smooth, or a tinted skin.
+- Particles take one colour a batch, not one a vertex.
 - Materials have one default roughness unless you write overrides. No remastered content
   is included.
 - Remix's replacement mods (the RTX Remix Toolkit workflow) do not apply to content
   submitted through the API in runtime 1.6.1, so the Toolkit cannot be used to author
   for this. The override table is the authoring route.
-- Changing the resolution in the game's options while path tracing is untested. Thin
-  glass is an untested option (`Glass=1`).
+- After path tracing is switched back on the picture is dim for about a second.
 - Linux and Proton only so far. The adapter is ordinary Win32 code and may well work on
   Windows; it has not been tried.
 
 ## Backlog
 
-Besides fixing what is listed above:
-
-- **A third look: the engine's brightness with Remix's tone mapping.** The F11 "Look"
-  row has two settings: the engine's brightness (fixed exposure, no tone curve) and
-  Remix's own (auto exposure, tone mapped). The third would keep the fixed exposure, so
-  rooms stay as bright as the game makes them, with Remix's tone mapper on, whose colours
-  look truer to the game. Better still, make the parts adjustable in the panel (tone
-  mapping, auto exposure, exposure) and let "Look" only fill them in. Not started.
+- **Calibrate the lights against the engine's own lightmaps.** The mission files hold
+  what the engine baked on every polygon. Fitting each light's strength to that, and not
+  to an assumed falloff rule, is the way to close the gap in large rooms and in colour.
 - Playing the game through path traced, deck by deck, to find the engine's remaining
   special cases.
+- Water with real refraction; per-vertex colour on particles.
 
 ## How it works
 
