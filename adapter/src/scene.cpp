@@ -299,6 +299,11 @@ static void read_polygon_constants(ID3D11DeviceContext* ctx, WorldRange& range) 
       memcpy(&shade, data + 80, 4);
       range.unshaded = shade == 0;
     }
+    if (size >= 92) {
+      int cube = 0;
+      memcpy(&cube, data + 88, 4);
+      range.env_mapped = cube == 1;
+    }
   }
   for (auto* cb : cbs) if (cb) cb->Release();
 }
@@ -374,6 +379,10 @@ static void load_remembered_polygons() {
   swprintf(name, 64, L"%016llx.txt", (unsigned long long)g_world.vb_hash);
   std::wstring dir = g_texture_dir + L"..\\levels\\";
   CreateDirectoryW(dir.c_str(), nullptr);
+  // (Files of builds that took the engine's reflection passes for lit surfaces are dropped:
+  // what they remember of such polygons is wrong until each has been seen again.)
+  DeleteFileW((dir + name).c_str());
+  swprintf(name, 64, L"%016llx-2.txt", (unsigned long long)g_world.vb_hash);
   g_level_file = dir + name;
   g_pending_lines.clear();
   g_cached_texture_index.clear();
@@ -429,14 +438,15 @@ static void load_remembered_polygons() {
     }
     if (line[0] == 'F') {   // "F": lighting flags of a polygon
       unsigned start = 0;
-      int unshaded = 0, over_unshaded = 0;
+      int unshaded = 0, over_unshaded = 0, env = 0;
       float illum = 0;
-      if (sscanf(line + 1, "%u %d %f %d", &start, &unshaded, &illum, &over_unshaded) == 4) {
+      if (sscanf(line + 1, "%u %d %f %d %d", &start, &unshaded, &illum, &over_unshaded, &env) >= 4) {
         auto it = g_world.ranges.find(start);
         if (it != g_world.ranges.end()) {
           it->second.unshaded = unshaded != 0;
           it->second.illumination = illum;
           it->second.overlay_unshaded = over_unshaded != 0;
+          it->second.env_mapped = env != 0;
         }
       }
       continue;
@@ -517,7 +527,7 @@ static void remember_glow(const WorldRange& r) {
 
 static void remember_flags(const WorldRange& r) {
   char line[96];
-  snprintf(line, sizeof line, "F %u %d %g %d\n", r.start, r.unshaded ? 1 : 0, r.illumination, r.overlay_unshaded ? 1 : 0);
+  snprintf(line, sizeof line, "F %u %d %g %d %d\n", r.start, r.unshaded ? 1 : 0, r.illumination, r.overlay_unshaded ? 1 : 0, r.env_mapped ? 1 : 0);
   g_pending_lines.push_back(line);
 }
 
@@ -708,6 +718,10 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
       r.seen_frame = g_frame;
       if (r.water_surface) return;   // water's first pass is a ripple layer, not its surface
       const void* view = bound_texture_view(ctx);
+      // A pass that is the engine's reflection samples its cube map: what sits in the
+      // texture slot is left over from another draw and changes with the view. It says
+      // nothing about this polygon, least of all that its texture is being swapped.
+      if (r.env_mapped && r.last_view != nullptr) return;
       if (view == r.last_view) return;
       // The texture bound is not the one we last saw here. Either this polygon came from
       // an earlier session and is being confirmed, or the engine has swapped its texture.
@@ -719,9 +733,10 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
       if (confirming) {
         WorldRange now;
         read_polygon_constants(ctx, now);
-        if (now.unshaded != r.unshaded) {
+        if (now.unshaded != r.unshaded || now.env_mapped != r.env_mapped) {
           r.unshaded = now.unshaded;
           r.illumination = now.illumination;
+          r.env_mapped = now.env_mapped;
           remember_flags(r);
           rebuild = true;
         }
@@ -791,7 +806,7 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
         int t = texture_for(ctx);
         bool usable = t >= 0 && !g_textures[t].uniform && !g_textures[t].solid && (r.texture < 0 || g_textures[t].hash != g_textures[r.texture].hash);
         if (kind == 5 && usable && g_textures[t].width < 16) usable = false;   // a gradient strip, not a wall
-        if ((kind == 5 || !now.unshaded) && usable) {
+        if ((kind == 5 || !now.unshaded) && usable && !now.env_mapped) {
           r.texture = t;
           r.last_view = nullptr;   // the first pass binds another texture: do not take that for a change
           r.unshaded = false;
@@ -813,6 +828,7 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
       // A polygon may have two additive passes; the stronger one of a frame counts.
       WorldRange now;
       read_polygon_constants(ctx, now);
+      if (now.env_mapped) return;   // a reflection added on top, not the glow
       const float* c = now.color;
       float strength = c[3] * (c[0] > c[1] ? (c[0] > c[2] ? c[0] : c[2]) : (c[1] > c[2] ? c[1] : c[2]));
       if (r.glow_frame != g_frame || strength > r.glow_strength) r.glow_strength = strength;
@@ -821,11 +837,19 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
     }
     if (layered && r.overlay_texture >= 0) return;
     int t = texture_for(ctx);
-    if (t < 0 || g_textures[t].uniform || g_textures[t].solid) return;   // a blank layer adds nothing
     WorldRange constants;
     read_polygon_constants(ctx, constants);
+    if (constants.env_mapped) {
+      // A reflection (the engine's cube map) laid over the polygon: it is polished. The
+      // texture slot holds nothing of this pass.
+      if (!r.env_layer && !r.env_mapped) { r.env_layer = true; ++g_world.revision; }
+      return;
+    }
+    if (t < 0 || g_textures[t].uniform || g_textures[t].solid) return;   // a blank layer adds nothing
     if (layered) {
-      if (t == r.texture) return;
+      // (Over a first pass that is only a reflection, the texture still bound from that
+      // pass is this one's own: it is the layer all the same.)
+      if (t == r.texture && !r.env_mapped) return;
       r.overlay_texture = t;
       r.overlay_unshaded = constants.unshaded;
       memcpy(r.overlay_scale, constants.scale, sizeof r.overlay_scale);
@@ -862,7 +886,7 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
   g_world.ranges[start] = range;
   ++g_world.revision;
   remember_polygon(range);
-  if (range.unshaded) remember_flags(range);
+  if (range.unshaded || range.env_mapped) remember_flags(range);
 }
 
 static int model_for(ID3D11DeviceContext* ctx, ID3D11Buffer* vb, ID3D11Buffer* ib, DXGI_FORMAT ib_format) {
@@ -1021,6 +1045,18 @@ static void on_object_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT
         memcpy(&shade, material + 80, 4);
         d.unshaded = shade == 0;
         memcpy(&d.illumination, material + 64, 4);
+        // CubeMap: the pixel shader takes the colour from the engine's cube map, by the
+        // mirrored view direction, in place of the texture (whatever is still bound in the
+        // texture slot is not used). A reflecting part: not a lamp, however "unshaded".
+        if (material_size >= 92) {
+          int cube = 0;
+          memcpy(&cube, material + 88, 4);
+          if (cube == 1) {
+            d.env_mapped = true;
+            memcpy(&d.lod_bias, material + 84, 4);
+            d.texture = -1;
+          }
+        }
         // The engine also multiplies by an "incidence" colour, looked up in a small map by
         // the angle and distance it is seen from: how a light panel is bright close up and
         // dark from along the corridor. Here the map's average stands for it; the same for
@@ -1074,6 +1110,15 @@ static void on_object_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT
         d.alpha_blend = d.blended && bd.RenderTarget[0].SrcBlend == D3D11_BLEND_SRC_ALPHA && bd.RenderTarget[0].DestBlend == D3D11_BLEND_INV_SRC_ALPHA;
         blend->Release();
       }
+      if (d.env_mapped) {
+        static int told = 0;
+        if (told < 12 && ++told)
+          logf("scene: a reflecting object part (the engine's cube map): colour %.2f %.2f %.2f %.2f, %s, illumination %.2f, blur %.2f, %s", d.color[0], d.color[1],
+               d.color[2], d.color[3], d.unshaded ? "unshaded" : "shaded", d.illumination, d.lod_bias,
+               d.additive ? "added" : d.alpha_blend ? "blended over" : d.blended ? "other blend" : "solid");
+        d.unshaded = false;
+        d.illumination = 0.0f;
+      }
       ID3D11RasterizerState* raster = nullptr;
       ctx->RSGetState(&raster);
       if (raster) {
@@ -1092,7 +1137,10 @@ static void on_object_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT
         ObjectDraw* prev = g_frame_objects.empty() ? nullptr : &g_frame_objects.back();
         bool repeat = prev && prev->model == d.model && prev->start == d.start && prev->count == d.count && prev->node_count == d.node_count &&
                       memcmp(&g_frame_nodes[(size_t)prev->node_offset * 16], nodes + first, bytes) == 0;
-        if (repeat) {
+        if (repeat && d.env_mapped) {
+          // A reflection laid over the part just drawn: that part is polished.
+          if (!prev->env_mapped) prev->env_layer = true;
+        } else if (repeat) {
           bool prev_flat = prev->texture < 0 || g_textures[prev->texture].solid;
           bool this_flat = d.texture < 0 || g_textures[d.texture].solid;
           // A blended, self-lit repeat is the surface's glow: bright where the texture's
@@ -1100,8 +1148,9 @@ static void on_object_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT
           // (Not one whose texture is see-through nearly everywhere: the engine scales the
           // layer by that alpha, so it adds next to nothing, whatever colour the texture holds.
           // The wall light panels of the Ops deck's dark corridors are such.)
+          bool faint = (d.additive || d.alpha_blend) && d.texture >= 0 && g_textures[d.texture].has_mean && g_textures[d.texture].mean_alpha < 0.03f;
           bool lit_layer = (d.additive || d.alpha_blend) && (d.unshaded || d.illumination > 0.5f) && d.texture >= 0 && !g_textures[d.texture].solid &&
-                           !g_textures[d.texture].uniform && !prev->blended && !(g_textures[d.texture].has_mean && g_textures[d.texture].mean_alpha < 0.03f);
+                           !g_textures[d.texture].uniform && !prev->blended && !faint;
           if (lit_layer) {
             const float* c = d.color;
             float strength = c[3] * (c[0] > c[1] ? (c[0] > c[2] ? c[0] : c[2]) : (c[1] > c[2] ? c[1] : c[2]));
@@ -1111,7 +1160,9 @@ static void on_object_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT
               prev->glow_texture = d.texture;
               prev->glow_strength = strength;
             }
-          } else {
+          } else if (!faint) {
+            // (A faint layer is left out altogether: it must not make the part under it
+            // full-bright, which is what an unshaded repeat otherwise says.)
             prev->unshaded = prev->unshaded || d.unshaded;
           }
           if (prev_flat && !this_flat) {   // the textured pass describes the surface better
@@ -1389,7 +1440,15 @@ int scene_water_at(uint32_t start) {
   uint32_t vi = g_world.indices[start];
   if (vi >= g_world.vertices.size()) return 0;
   uint32_t poly = g_world.vertices[vi].flags & 0x7FFFF;
-  return poly < g_water.size() ? g_water[poly] : 0;
+  return poly < g_water.size() && g_water[poly] != 3 ? g_water[poly] : 0;
+}
+
+bool scene_opening_at(uint32_t start) {
+  if (g_water.empty() || start >= g_world.indices.size()) return false;
+  uint32_t vi = g_world.indices[start];
+  if (vi >= g_world.vertices.size()) return false;
+  uint32_t poly = g_world.vertices[vi].flags & 0x7FFFF;
+  return poly < g_water.size() && g_water[poly] != 0;
 }
 
 static void connect_light_feeds(const std::vector<int>& scene_index) {
@@ -1427,17 +1486,17 @@ static void connect_light_feeds(const std::vector<int>& scene_index) {
       for (unsigned e = file.first[poly]; e < file.first[poly + 1]; ++e) {
         unsigned light = file.lights[e];
         if (light < scene_index.size() && scene_index[light] >= 0)
-          g_baked.layers.push_back({ (uint32_t)poly, scene_index[light], { file.layer[e * 3], file.layer[e * 3 + 1], file.layer[e * 3 + 2] } });
+          g_baked.layers.push_back({ (uint32_t)poly, scene_index[light], { file.layer[e * 3], file.layer[e * 3 + 1], file.layer[e * 3 + 2] }, e });
       }
   }
   g_water.clear();
   if (trusted && file.water.size() == polys) {
-    size_t surfaces = 0;
-    for (unsigned char kind : file.water) surfaces += kind != 0;
-    if (surfaces) {
+    size_t surfaces = 0, openings = 0;
+    for (unsigned char kind : file.water) { surfaces += kind == 1 || kind == 2; openings += kind == 3; }
+    if (surfaces || openings) {
       g_water = file.water;
       ++g_world.revision;   // the level mesh is built again with them marked
-      logf("scene: %zu water surface polygons in this level", surfaces);
+      logf("scene: %zu water surface polygons in this level, and %zu openings between cells that are no surface at all", surfaces, openings);
     }
   }
   if (trusted) {

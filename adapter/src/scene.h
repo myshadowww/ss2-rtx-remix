@@ -37,6 +37,9 @@ struct WorldRange {
   // alpha-blended over it (panelling over a blank base, lettering over a wall).
   bool unshaded = false;             // DarkMaterialConstants.Shade == 0: full-bright, a screen or a sign
   float illumination = 0.0f;         // DarkMaterialConstants.Illumination
+  bool env_mapped = false;           // DarkMaterialConstants.CubeMap: this pass shows the engine's reflection (cube map) times
+                                     // the colour, not a texture; what is bound in the texture slot is not used
+  bool env_layer = false;            // ...or a later pass lays such a reflection over this polygon: it is polished
   bool overlay_unshaded = false;
   // The engine swaps the texture of some polygons while they are on show (screens).
   // Those are kept out of the level mesh and drawn as small meshes of their own.
@@ -120,6 +123,10 @@ struct ObjectDraw {
   int glow_texture = -1;      // texture of that pass
   float glow_strength = 0;    // its colour alpha times its brightest channel
   float illumination = 0;     // DarkMaterialConstants.Illumination
+  bool env_mapped = false;    // DarkMaterialConstants.CubeMap: the engine shows a reflection (its cube map
+                              // looked up by the mirrored view direction) times the colour, no texture
+  bool env_layer = false;     // ...or lays such a reflection over this part in a blended second pass
+  float lod_bias = 0;         // how blurred the engine's reflection is (mip bias into the cube map)
   float color[4] = { 1, 1, 1, 1 };   // DarkMaterialConstants.Color
   float uv_matrix[12];
   uint32_t node_offset = 0;   // into scene_frame_nodes(), 16 floats per node
@@ -227,7 +234,7 @@ const std::vector<ModelMesh>& scene_models();
 // otherwise. `steady`: the mean lightmap value from the lights that never change (-1:
 // none). `layers`: for an animated light (index into scene_lights()), the mean of its own
 // lightmap layer on one polygon at the light's full brightness.
-struct BakedLayer { uint32_t polygon; int light; float mean[3]; };
+struct BakedLayer { uint32_t polygon; int light; float mean[3]; uint32_t entry; };   // entry: of the mission file's per-polygon light list
 struct BakedLight {
   std::vector<float> steady;   // red, green, blue per polygon
   std::vector<BakedLayer> layers;
@@ -238,6 +245,9 @@ bool scene_lights_from_mission();   // false while the lights are only those met
 // 0, or what the level polygon whose indices start at `start` is by the mission file: 1 a
 // water surface seen from the air, 2 one seen from under the water.
 int scene_water_at(uint32_t start);
+// True for an opening between two cells (water or not): a polygon that is no wall, and
+// that must not stand in the level as one while the engine has not drawn it.
+bool scene_opening_at(uint32_t start);
 
 const std::vector<ObjectDraw>& scene_frame_objects();   // cleared by scene_frame_end()
 

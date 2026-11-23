@@ -48,14 +48,17 @@ options. `USAGE.md` has the keys, every setting, material overrides and logs.
   level's geometry), including spotlights; flashing, flickering and switched lights follow
   the engine's own per-frame values; muzzle flashes and other moving lights.
 - Brightness and light colour close to the engine's: each light's strength is fitted to
-  the lightmaps the engine baked (read from the mission file), in linear light and less
+  the lightmaps the engine baked (read from the mission file texel by texel, each texel
+  placed on its polygon, with a shadow ray to every light), in linear light and less
   what bounced light adds, channel by channel, with the engine's ambient level as a floor.
-  At 69 places over all 23 decks (three a deck, picked by a script), two thirds of the
-  views are within 25% of the engine's mean level and seven eighths within 50%.
+  At 69 places over all 23 decks (three a deck, picked by a script), 46 of the 68
+  usable views are within 25% of the engine's mean level and 59 within 50%; the rest are
+  mostly on the dark side by choice.
 - Particles and sparks with the engine's own blend and per-vertex colour; water surfaces
   (mirror-smooth, a see-through skin, or a boundary that bends light).
 - Screens, lit signs, glow layers, decals, see-through surfaces, the sky box through
-  windows.
+  windows. Surfaces the engine paints a canned reflection on (its cube-map passes) are
+  polished or mirror surfaces here and reflect the room.
 - The game's HUD, weapon, menus, saves and input, untouched.
 - An in-game settings panel (F11): path tracing on/off, upscaler and DLSS mode, ray
   reconstruction, DLSS neural rendering, indirect light mode, bounces, the look (the
@@ -64,7 +67,9 @@ options. `USAGE.md` has the keys, every setting, material overrides and logs.
   light levels. Changing the resolution in the game's options works while path tracing. Scroll Lock switches between path traced and the
   engine's renderer at any time.
 - A material override table (`ss2rtx/materials.txt`, reloaded live) for roughness,
-  metalness, normal and height maps per texture.
+  metalness, normal and height maps per texture, and a script (`tools/author.py`) that
+  fills it with a starter set: a normal map and a roughness map worked out from each of
+  the game's textures on your machine.
 - Installer and uninstaller with a manifest and backups; a launcher for a private test
   copy that always closes what it started; scripted test runs, a screenshot regression
   check, a 23-mission sweep and a tool that renders the same views both ways for
@@ -80,11 +85,12 @@ DLSS Performance. The game stays at its 120 fps cap at 720p and 1080p.
   and the engine's with the distance, so surfaces near a light are brighter than the
   engine's and far ones darker even when the room as a whole matches. Coloured light is a
   little weaker than the engine's.
-- The engine's view-dependent "incidence" maps are not applied: the light panels of one
-  corridor (Ops 1) glow white where the engine keeps them dark, and a few other full-bright
-  parts are brighter than they should be.
-- Materials have one default roughness unless you write overrides. No remastered content
-  is included.
+- The engine's view-dependent "incidence" maps (a part's colour and opacity by viewing
+  angle and distance) are applied as their average only.
+- Glowing surfaces light what is round them, which the engine's did not: the training
+  level's grid rooms have a faint blue wash on walls the engine leaves black.
+- No hand-made materials. Without the generated starter set every surface has one default
+  roughness; with it, relief and gloss are a guess from each texture's colour.
 - Remix's replacement mods (the RTX Remix Toolkit workflow) do not apply to content
   submitted through the API in runtime 1.6.1, so the Toolkit cannot be used to author
   for this. The override table is the authoring route.
@@ -95,8 +101,8 @@ DLSS Performance. The game stays at its 120 fps cap at 720p and 1080p.
 
 - Playing the game through path traced, deck by deck, to find the engine's remaining
   special cases.
-- Finer lighting: the fit uses each polygon's mean lightmap value; sampling the
-  lightmaps texel by texel would tighten dark corridors and large rooms further.
+- Materials made by hand for the surfaces that matter most (the generated set is a
+  starting point).
 
 ## How it works
 
@@ -124,7 +130,7 @@ Source layout:
 | `adapter/src/census.cpp` | dumps one frame's draw stream for analysis |
 | `tests/` | stand-alone probes: Remix under Proton, readback, the D3D11 hand-off |
 | `build.py`, `install.py`, `launch.py`, `play.py`, `regress.py` | build, install, test launcher, optional Steam launch wrapper, regression check |
-| `tools/` | mission sweep, start-anywhere, side-by-side survey, a walk through every deck in both renderers, draw-stream census reader |
+| `tools/` | mission sweep, start-anywhere, side-by-side survey, a walk through every deck in both renderers, draw-stream census reader, material starter set |
 
 ## Building it yourself
 
@@ -179,6 +185,10 @@ Other findings worth knowing if you build on the Remix API:
   then destroying the old one destroys the new one too.
 - **DLSS neural rendering is masked per material** (the `dlssControlMask*` fields of the
   opaque material record, API 0.6.5). Left at zero, the model runs and changes nothing.
+- **The engine's reflection passes leave a stale texture bound.** A KEX Dark material
+  with `CubeMap` set samples the cube map (slot 4) by the mirrored view direction; slot 0
+  still holds whatever the draw before left there. Reading it as the surface's texture
+  gave lit walls that were not there, and "texture-swapping" polygons that were not.
 - **Alpha-tested "decals" are only decals if the material blends**, and emissive blended
   layers go to the unordered acceleration structure.
 - Remix's default auto-exposure and local tone mapper brighten dark rooms considerably.

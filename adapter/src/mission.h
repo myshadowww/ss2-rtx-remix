@@ -34,8 +34,9 @@ struct MissionLightAnim {
 struct MissionPolyLights {
   std::vector<unsigned> first;
   std::vector<unsigned short> lights;
-  // Per polygon: 0, or what a textured opening between two cells is, which in this game
-  // is always a water surface: 1 seen from the air, 2 seen from under the water.
+  // Per polygon: 0, or what a textured opening between two cells is: a water surface, 1
+  // seen from the air, 2 seen from under the water; or 3, an opening with the same medium
+  // on both sides, which the engine does not draw at all (nothing is there).
   std::vector<unsigned char> water;
   // What the engine baked, as red, green, blue triples: the mean of each polygon's
   // lightmap for the lights that never change (0 to 1, 1 being the texture at full
@@ -44,6 +45,17 @@ struct MissionPolyLights {
   // of the moment.
   std::vector<float> baked;
   std::vector<float> layer;
+  // The same lightmaps in finer grain: up to sixteen sample points on each polygon (its
+  // lightmap's texels, in blocks where there are more), polygon p having samples
+  // sample_first[p] .. sample_first[p + 1] - 1. A sample is seven floats: where it is in
+  // the world, its share of the polygon's area (a polygon's shares add up to 1), and the
+  // steady lightmap's red, green and blue there. `layer_samples` holds, for each entry of
+  // `lights`, that light's own layer at the same points: three floats a sample, entry e
+  // starting at layer_sample_first[e]. Empty for mission formats older than this game's.
+  std::vector<unsigned> sample_first;
+  std::vector<float> samples;
+  std::vector<unsigned> layer_sample_first;
+  std::vector<float> layer_samples;
 };
 const MissionPolyLights& mission_poly_lights();
 

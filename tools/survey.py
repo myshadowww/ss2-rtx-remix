@@ -11,7 +11,7 @@ object positions usually are not.
 """
 import subprocess, sys, shutil
 from pathlib import Path
-from PIL import Image, ImageStat
+from PIL import Image, ImageChops, ImageStat
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / 'run/survey'
 OUT.mkdir(parents=True, exist_ok=True)
@@ -40,6 +40,12 @@ for i, f in enumerate(files[:8]):
     mean = ImageStat.Stat(im.convert('L')).mean[0]
     print(f'view {i // 2} {"path traced" if i % 2 == 0 else "engine     "} mean {mean:5.1f}  {f.name}')
     sheet.paste(im.resize((W, H)), ((i % 2) * W, (i // 2) * H))
+# The launcher's clock and the game's differ by a second or two from run to run. If a
+# switch slipped past its shot, both shots of a view are the same frame: say so.
+for view in range(len(files[:8]) // 2):
+    a, b = (Image.open(f).convert('RGB') for f in files[view * 2:view * 2 + 2])
+    if sum(ImageStat.Stat(ImageChops.difference(a, b)).mean) < 0.05:
+        print(f'view {view}: both shots are the same frame; the switch missed its shot, run it again')
 sheet.save(OUT / f'{tag}.png')
 shutil.copy(ROOT / 'run/game/ss2rtx.log', OUT / f'{tag}.log')
 print(OUT / f'{tag}.png')

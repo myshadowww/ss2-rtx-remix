@@ -118,18 +118,28 @@ static size_t read_cells(const std::vector<unsigned char>& w, int kind) {
   g_poly_lights.water.clear();
   g_poly_lights.baked.clear();
   g_poly_lights.layer.clear();
+  g_poly_lights.sample_first.clear();
+  g_poly_lights.samples.clear();
+  g_poly_lights.layer_sample_first.clear();
+  g_poly_lights.layer_samples.clear();
   auto u32 = [&](size_t at) { unsigned v = 0; if (at + 4 <= w.size()) memcpy(&v, &w[at], 4); return v; };
   size_t p = kind == 2 ? 28 : 8;
   unsigned cells = u32(kind == 2 ? 24 : 4);
   size_t texel = kind == 2 ? (u32(12) == 0 ? 2 : 4) : kind == 1 ? 2 : 1;
   size_t render_poly = kind == 2 ? 52 : 48;
   bool ok = w.size() > p && cells > 0 && cells < 100000;
+  struct Opening { unsigned polygon, target; unsigned char medium; };
+  std::vector<Opening> openings;
+  std::vector<unsigned char> media;
   for (unsigned c = 0; c < cells && ok; ++c) {
     if (p + 31 > w.size()) { ok = false; break; }
     unsigned vertices = w[p], polys = w[p + 1], render_polys = w[p + 2], portals = w[p + 3], planes = w[p + 4], medium = w[p + 5], anim_lights = w[p + 13];
     unsigned solid = polys >= portals ? polys - portals : polys;   // the polygons after these are openings to other cells
+    media.push_back((unsigned char)medium);
+    size_t vertices_at = p + 31, polys_at = vertices_at + 12 * (size_t)vertices, render_at = polys_at + 8 * (size_t)polys;
     p += 31 + 12 * (size_t)vertices + 8 * (size_t)polys + render_poly * render_polys;
     if (p + 4 > w.size()) { ok = false; break; }
+    size_t index_at = p + 4, index_bytes = u32(p), index_next = 0;
     p += 4 + (size_t)u32(p) + 16 * (size_t)planes;
     size_t anim_at = p;
     p += 2 * (size_t)anim_lights;
@@ -141,6 +151,11 @@ static size_t read_cells(const std::vector<unsigned char>& w, int kind) {
       unsigned height = info[6], width = info[7], flags;
       memcpy(&flags, info + 16, 4);
       g_poly_lights.first.push_back((unsigned)g_poly_lights.lights.size());
+      if (i >= solid && i < polys) {
+        unsigned short target = 0;
+        memcpy(&target, &w[polys_at + 8 * (size_t)i + 4], 2);
+        openings.push_back({ (unsigned)g_poly_lights.water.size(), target, (unsigned char)medium });
+      }
       g_poly_lights.water.push_back(i >= solid ? (medium == 2 ? 2 : 1) : 0);
       unsigned layers = 0;
       for (unsigned b = 0; b < 32; ++b) {
@@ -154,6 +169,103 @@ static size_t read_cells(const std::vector<unsigned char>& w, int kind) {
       // The lightmap itself: the steady layer first, then one layer per animated light.
       size_t texels = (size_t)width * height;
       if (p + (size_t)(1 + layers) * texels * texel > w.size()) { ok = false; break; }
+      auto texel_rgb = [&](unsigned layer, size_t t, float* rgb) {
+        const unsigned char* data = &w[p + (size_t)layer * texels * texel];
+        if (texel == 4) {   // stored blue, green, red, alpha
+          rgb[0] = data[t * 4 + 2] / 255.0f; rgb[1] = data[t * 4 + 1] / 255.0f; rgb[2] = data[t * 4] / 255.0f;
+        } else if (texel == 2) {
+          unsigned v = data[t * 2] | data[t * 2 + 1] << 8;
+          rgb[0] = (v >> 10 & 31) / 31.0f; rgb[1] = (v >> 5 & 31) / 31.0f; rgb[2] = (v & 31) / 31.0f;
+        } else {
+          rgb[0] = rgb[1] = rgb[2] = data[t] / 255.0f;
+        }
+      };
+      // Where each texel is in the world. The polygon's texture axes U and V (in its plane)
+      // and its anchor vertex O give a point's texture coordinates a, b by P = O + aU + bV;
+      // the lightmap has four texels to one unit of those, texel (i, j)'s middle being at
+      // a = (i + info.u) / 4 - u_base, likewise b. (This game's format only: floats.)
+      g_poly_lights.sample_first.push_back((unsigned)(g_poly_lights.samples.size() / 7));
+      for (unsigned layer = 0; layer < layers; ++layer) g_poly_lights.layer_sample_first.push_back((unsigned)(g_poly_lights.layer_samples.size() / 3));
+      unsigned corners = i < polys ? w[polys_at + 8 * (size_t)i + 1] : 0;
+      size_t corner_at = index_at + index_next;
+      index_next += corners;
+      if (kind == 2 && texels > 1 && corners >= 3 && corners <= 32 && index_next <= index_bytes) {
+        const unsigned char* rp = &w[render_at + render_poly * (size_t)i];
+        float U[3], V[3], base[2];
+        unsigned short anchor;
+        short lm_u, lm_v;
+        memcpy(U, rp, 12); memcpy(V, rp + 12, 12); memcpy(base, rp + 24, 8); memcpy(&anchor, rp + 34, 2);
+        memcpy(&lm_u, info, 2); memcpy(&lm_v, info + 2, 2);
+        float corner_uv[32][2], O[3] = { 0, 0, 0 };
+        bool usable = anchor < corners;
+        for (unsigned k = 0; k < corners && usable; ++k) if (w[corner_at + k] >= vertices) usable = false;
+        if (usable) memcpy(O, &w[vertices_at + 12 * (size_t)w[corner_at + anchor]], 12);
+        double uu = 0, vv = 0, uv = 0;
+        for (int k = 0; k < 3; ++k) { uu += (double)U[k] * U[k]; vv += (double)V[k] * V[k]; uv += (double)U[k] * V[k]; }
+        double det = uu * vv - uv * uv;
+        if (!(det > 1e-12)) usable = false;
+        for (unsigned k = 0; k < corners && usable; ++k) {   // the polygon's outline in texel coordinates
+          float P[3];
+          memcpy(P, &w[vertices_at + 12 * (size_t)w[corner_at + k]], 12);
+          double pu = 0, pv = 0;
+          for (int a = 0; a < 3; ++a) { pu += (double)U[a] * (P[a] - O[a]); pv += (double)V[a] * (P[a] - O[a]); }
+          corner_uv[k][0] = (float)(4.0 * ((pu * vv - pv * uv) / det + base[0]) + 0.5 - lm_u);
+          corner_uv[k][1] = (float)(4.0 * ((pv * uu - pu * uv) / det + base[1]) + 0.5 - lm_v);
+        }
+        // Texels whose middle is on the polygon (or within a third of a texel of it), in
+        // blocks, at most four blocks each way.
+        double turn = 0.0;
+        for (unsigned k = 0; k < corners && usable; ++k) {
+          const float *a = corner_uv[k], *b = corner_uv[(k + 1) % corners], *c2 = corner_uv[(k + 2) % corners];
+          turn += (double)(b[0] - a[0]) * (c2[1] - b[1]) - (double)(b[1] - a[1]) * (c2[0] - b[0]);
+        }
+        auto inside = [&](float x, float y) {
+          for (unsigned k = 0; k < corners; ++k) {
+            const float *a = corner_uv[k], *b = corner_uv[(k + 1) % corners];
+            float ex = b[0] - a[0], ey = b[1] - a[1], len = sqrtf(ex * ex + ey * ey);
+            if (len < 1e-6f) continue;
+            float side = (ex * (y - a[1]) - ey * (x - a[0])) / len;
+            if ((turn >= 0.0 ? side : -side) < -0.34f) return false;
+          }
+          return true;
+        };
+        unsigned step_x = (width + 3) / 4, step_y = (height + 3) / 4;
+        size_t first_sample = g_poly_lights.samples.size();
+        std::vector<float> layer_values;   // per block: 3 floats a layer
+        unsigned inside_total = 0;
+        for (unsigned by = 0; by < height && usable; by += step_y)
+          for (unsigned bx = 0; bx < width; bx += step_x) {
+            double sum[3] = { 0, 0, 0 }, at_x = 0, at_y = 0;
+            std::vector<double> layer_sum(layers * 3, 0.0);
+            unsigned n = 0;
+            for (unsigned y = by; y < by + step_y && y < height; ++y)
+              for (unsigned x = bx; x < bx + step_x && x < width; ++x) {
+                if (!inside(x + 0.5f, y + 0.5f)) continue;
+                float rgb[3];
+                size_t t = (size_t)y * width + x;
+                texel_rgb(0, t, rgb);
+                for (int c2 = 0; c2 < 3; ++c2) sum[c2] += rgb[c2];
+                for (unsigned layer = 0; layer < layers; ++layer) {
+                  texel_rgb(1 + layer, t, rgb);
+                  for (int c2 = 0; c2 < 3; ++c2) layer_sum[layer * 3 + c2] += rgb[c2];
+                }
+                at_x += x + 0.5; at_y += y + 0.5;
+                ++n;
+              }
+            if (!n) continue;
+            double a = (at_x / n - 0.5 + lm_u) / 4.0 - base[0], b = (at_y / n - 0.5 + lm_v) / 4.0 - base[1];
+            for (int k = 0; k < 3; ++k) g_poly_lights.samples.push_back((float)(O[k] + a * U[k] + b * V[k]));
+            g_poly_lights.samples.push_back((float)n);
+            for (int c2 = 0; c2 < 3; ++c2) g_poly_lights.samples.push_back((float)(sum[c2] / n));
+            for (double v : layer_sum) layer_values.push_back((float)(v / n));
+            inside_total += n;
+          }
+        size_t made = (g_poly_lights.samples.size() - first_sample) / 7;
+        for (size_t k = 0; k < made; ++k) g_poly_lights.samples[first_sample + k * 7 + 3] /= (float)inside_total;
+        for (unsigned layer = 0; layer < layers; ++layer)   // from block-major to layer-major
+          for (size_t k = 0; k < made; ++k)
+            for (int c2 = 0; c2 < 3; ++c2) g_poly_lights.layer_samples.push_back(layer_values[k * layers * 3 + layer * 3 + c2]);
+      }
       for (unsigned layer = 0; layer <= layers; ++layer) {
         const unsigned char* data = &w[p + (size_t)layer * texels * texel];
         double sum[3] = { 0, 0, 0 };
@@ -178,15 +290,28 @@ static size_t read_cells(const std::vector<unsigned char>& w, int kind) {
     if (p + 4 > w.size()) { ok = false; break; }
     p += 4 + 2 * (size_t)u32(p);
   }
+  // Water is where the medium changes across the opening (2 is water). The same on both
+  // sides: nothing to see.
+  for (const Opening& o : openings) {
+    if (!ok || o.target >= media.size() || o.polygon >= g_poly_lights.water.size()) continue;
+    bool here = o.medium == 2, there = media[o.target] == 2;
+    g_poly_lights.water[o.polygon] = here == there ? 3 : here ? 2 : 1;
+  }
   if (ok && g_poly_lights.layer.size() != g_poly_lights.lights.size() * 3) ok = false;
   if (!ok) {
     g_poly_lights.first.clear();
     g_poly_lights.lights.clear();
+    g_poly_lights.sample_first.clear();
+    g_poly_lights.samples.clear();
+    g_poly_lights.layer_sample_first.clear();
+    g_poly_lights.layer_samples.clear();
     logf("mission: the level's cells could not be read; flashing lights will be replayed from their settings");
     return 0;
   }
   g_poly_lights.first.push_back((unsigned)g_poly_lights.lights.size());
-  logf("mission: %u cells, %zu polygons, %zu lightmap layers of animated lights", cells, g_poly_lights.first.size() - 1, g_poly_lights.lights.size());
+  g_poly_lights.sample_first.push_back((unsigned)(g_poly_lights.samples.size() / 7));
+  logf("mission: %u cells, %zu polygons, %zu lightmap layers of animated lights, %zu lightmap sample points", cells, g_poly_lights.first.size() - 1,
+       g_poly_lights.lights.size(), g_poly_lights.samples.size() / 7);
   return p;
 }
 

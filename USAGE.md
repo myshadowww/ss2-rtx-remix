@@ -99,6 +99,9 @@ variables override it):
 | `LiveLights` | 1 | flashing, flickering and switched lights follow the engine's own value each frame (or replay their rhythm from the mission file where that is not to be had); 0: every light steady at its table value |
 | `FitLights` | 1 | fit each light's strength to the level, where a plain match at five units leaves corridors too bright and big rooms too dark |
 | `FitLightmaps` | 1 | do that fit against the engine's own baked lightmaps from the mission file (0: against an assumed falloff rule only) |
+| `FitTexels` | 1 | ...texel by texel, each where it lies on its polygon, with a shadow ray from every point (0: one mean value per polygon) |
+| `FitRule` | 1 | what the fit matches: 1 every point's own ratio, weighted by what the lamp sends it (the points nearest a lamp weigh most, far walls err dark); 0 the light that shows on screen over each lamp's whole area (brighter: more places came out too bright in the walk) |
+| `FitHeadroom` | 2 | a texel the engine baked to full white counts against its lamps once they send it this many times white (0: never; brighter lamps and rooms) |
 | `LinearLightColour` | 1 | convert light colours to linear light so coloured lights tint as strongly as the engine's |
 | `StandOff` | 1 | move lights that sit close to a wall a little way out from it, so the wall gets a soft glow as in the engine, not a small bright disc |
 | `Sprites` | 1 | put the engine's particles, sparks and coronas into the path-traced scene (they are drawn before the point where the path-traced image replaces the engine's, so otherwise they are lost) |
@@ -156,6 +159,21 @@ it with the game running; expect one slow frame while everything is rebuilt.
 `ss2rtx_cache/textures_seen.txt` lists every texture the adapter has met, and the
 `.dds` files next to it are the textures themselves.
 
+A starter set, made by a script from the textures themselves:
+
+    python3 tools/author.py --steam      # or no option: the private test copy
+    python3 tools/author.py --steam --remove
+
+For every texture the adapter has met so far it works out a normal map (the relief the
+texture's light and dark suggest) and a roughness map (grey, pale surfaces smoother,
+coloured and dark ones matt; raised parts smoother than seams), writes them to
+`ss2rtx/authored/` and adds a marked block of lines to `materials.txt`. Screens, signs,
+cut-outs and small textures are left alone. Lines of your own after the block win, and a
+line replaces the whole entry for its texture. Run it again after visiting new decks. It
+needs numpy and Pillow. It is a guess from colour, not art: where a texture has painted
+shadows the relief is wrong, and you can delete that line. The maps are in the formats
+Remix reads natively: normals as two-channel octahedral BC5, roughness as BC4.
+
 ## Logs
 
 - `ss2rtx/ss2rtx.log` in the game folder (or `run/game/ss2rtx.log` under the launcher):
@@ -177,6 +195,7 @@ it with the game running; expect one slow frame while everything is rebuilt.
     python3 tools/tour.py off
     python3 tools/tour.py medsci2 --at=-12,-190,2,0        # ...with the player put at that spot, facing 0 degrees
     python3 tools/survey.py medsci2 -12,-190,2,0 icu       # same four views path traced and engine, into run/survey/
+    python3 tools/author.py                                # normal and roughness maps for the private copy's textures (see Tuning materials)
     python3 tools/steam_game_running.py && echo "the Steam copy is running"
     python3 tools/walk.py                                  # three places in each of the 23 decks, both renderers, into run/walk/ (75 minutes)
     python3 tools/walk.py ops1 --spots 5                   # one deck, more places
@@ -210,15 +229,20 @@ anything heavy on the disk at the same time: the menu keys are timed.
   lights take their brightness from the engine"). A light that reaches no level surface
   replays its rhythm from the file instead.
 - Lights fall off with the square of the distance (the engine's: with the distance). Each
-  light's strength is fitted to what the engine baked into its lightmaps, less what
-  bounced light will add, and lights close to a wall are moved a little way out from it
-  (two units at most) so the wall gets a glow, not a small bright disc. Measured against
-  the engine at 69 places over all 23 decks: two thirds within 25% of the engine's mean
-  level, seven eighths within 50%. Colours are close; the engine's are a little stronger.
-  F11, exposure, changes the overall level.
-- Known to be wrong: the light panels of the first corridor of Ops 1 glow white where the
-  engine keeps them dark, and a wall band in Rec 1 is too bright (the engine's
-  view-dependent "incidence" maps are not applied).
+  light's strength is fitted to what the engine baked into its lightmaps, texel by texel
+  and less what bounced light will add, and lights close to a wall are moved a little way
+  out from it (two units at most) so the wall gets a glow, not a small bright disc.
+  Measured against the engine at 69 places over all 23 decks: 46 of 68 usable
+  views within 25% of the engine's mean level, 59 within 50% (median 1.06; a surface close
+  to a lamp tends to be darker than the engine's, a far one brighter). Colours are close; the
+  engine's are a little stronger. F11, exposure, changes the overall level. The fit takes
+  up to three quarters of a second when a deck loads.
+- Surfaces the engine paints a canned reflection on are polished or mirror surfaces and
+  reflect the room as it is. The engine's view-dependent "incidence" maps are applied as
+  their average only.
+- The first time a deck is visited the adapter knows only the polygons it has been shown;
+  the rest stand in as plain grey until seen (they are remembered in `ss2rtx_cache` from
+  then on). This build starts those files afresh.
 - `Skip=<letters>` in `ss2rtx.ini` leaves parts of the scene out of the path-traced image
   (o objects, l lights, c characters): for finding where something on screen comes from.
 - Every mission loads and renders, and a script has looked at three places in each

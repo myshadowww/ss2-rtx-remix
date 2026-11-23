@@ -20,6 +20,7 @@
 #include "config.h"
 #include "log.h"
 #include "readback.h"
+#include "mission.h"
 #include "scene.h"
 #include "shaders.h"
 
@@ -94,6 +95,7 @@ static bool g_sky = true;             // the engine's sky box is sent to Remix
 static bool g_stand_off = true;       // lights close to a wall are moved out from it; see place_lights()
 static bool g_fit_lights = true;      // each light's strength is fitted to the room it lights; see place_lights()
 static bool g_linear_light_colour = true;   // light colours are taken from display space to linear light; see make_light()
+static bool g_fit_texels = true;      // ...and those lightmaps point by point, not as one mean per polygon (FitTexels)
 static bool g_fit_baked = true;       // ...against the engine's own lightmaps where the mission file gives them; see fit_to_baked()
 static int g_water_mode = 1;          // water surfaces: 0 as the engine textures them, 1 the same but mirror-smooth, 2 a see-through skin, 3 a boundary that bends light
 static bool g_sprite_vertex_colour = true;   // particles keep the colour and fade of each vertex, through the engine's own blend
@@ -235,6 +237,7 @@ static bool start() {
   g_stand_off = config_flag(L"StandOff", true);
   g_fit_lights = config_flag(L"FitLights", true);
   g_fit_baked = config_flag(L"FitLightmaps", true);
+  g_fit_texels = config_flag(L"FitTexels", true);
   g_linear_light_colour = config_flag(L"LinearLightColour", true);
   g_sprites = config_flag(L"Sprites", true);
   g_sprite_vertex_colour = config_flag(L"SpriteVertexColour", true);
@@ -498,6 +501,47 @@ static remixapi_MaterialHandle water_material(bool bends) {
   info.wrapModeV = 1;
   remixapi_MaterialHandle handle = nullptr;
   if (g_api.CreateMaterial(&info, &handle) != REMIXAPI_ERROR_CODE_SUCCESS) handle = nullptr;
+  g_materials[key] = handle;
+  return handle;
+}
+
+// A part the engine shows as a reflection (its cube map) times a colour: polished metal of
+// that colour. `blur` is the engine's mip bias into the cube map, 0 sharp.
+static remixapi_MaterialHandle mirror_material(const float* color, float blur) {
+  uint8_t q[4] = { (uint8_t)(std::clamp(color[0], 0.0f, 1.0f) * 32.0f + 0.5f), (uint8_t)(std::clamp(color[1], 0.0f, 1.0f) * 32.0f + 0.5f),
+                   (uint8_t)(std::clamp(color[2], 0.0f, 1.0f) * 32.0f + 0.5f), (uint8_t)(std::clamp(blur, 0.0f, 6.0f) * 2.0f + 0.5f) };
+  uint64_t key = fnv1a64(q, sizeof q, 0x4d4952524f525f31ull);
+  auto it = g_materials.find(key);
+  if (it != g_materials.end()) return it->second;
+  remixapi_MaterialInfoOpaqueEXT opaque = {};
+  opaque.sType = REMIXAPI_STRUCT_TYPE_MATERIAL_INFO_OPAQUE_EXT;
+  // The engine's colours are for the eye; a metal's reflectance is in linear light.
+  opaque.albedoConstant = { powf(q[0] / 32.0f, 2.2f), powf(q[1] / 32.0f, 2.2f), powf(q[2] / 32.0f, 2.2f) };
+  opaque.opacityConstant = 1.0f;
+  opaque.enableDlssControlMask = 1;
+  opaque.dlssControlMaskIntensity = 1.0f;
+  opaque.dlssControlMaskToneStrength = 1.0f;
+  opaque.dlssControlMaskStructuralStrength = 1.0f;
+  opaque.roughnessConstant = std::clamp(g_gloss_roughness * 0.5f + 0.08f * (q[3] / 2.0f), 0.04f, 0.6f);
+  opaque.metallicConstant = 1.0f;
+  opaque.roughnessTexture = L"";
+  opaque.metallicTexture = L"";
+  opaque.heightTexture = L"";
+  opaque.alphaTestType = 7;
+  remixapi_MaterialInfo info = {};
+  info.sType = REMIXAPI_STRUCT_TYPE_MATERIAL_INFO;
+  info.pNext = &opaque;
+  info.hash = key;
+  info.albedoTexture = L"";
+  info.normalTexture = L"";
+  info.tangentTexture = L"";
+  info.emissiveTexture = L"";
+  info.filterMode = 1;
+  info.wrapModeU = 1;
+  info.wrapModeV = 1;
+  remixapi_MaterialHandle handle = nullptr;
+  remixapi_ErrorCode r = g_api.CreateMaterial(&info, &handle);
+  if (r != REMIXAPI_ERROR_CODE_SUCCESS) { logf("remix: CreateMaterial(mirror) -> %d", (int)r); handle = nullptr; }
   g_materials[key] = handle;
   return handle;
 }
@@ -804,7 +848,9 @@ static void build_level(double seconds) {
       for (uint32_t i = r.start; i < r.start + r.count; ++i) covered[i] = true;
       continue;
     }
-    const SceneTexture* base = r.texture >= 0 ? &textures[r.texture] : nullptr;
+    // (A first pass that is the engine's reflection has no texture of its own, whatever
+    // was still bound.)
+    const SceneTexture* base = r.texture >= 0 && !r.env_mapped ? &textures[r.texture] : nullptr;
     const SceneTexture* over = r.overlay_texture >= 0 ? &textures[r.overlay_texture] : nullptr;
     // The engine's two-layer surfaces are polished panels: a full-bright first pass with a
     // fake reflection (or nothing) in it, then the panel itself, slightly see-through. Here
@@ -818,6 +864,9 @@ static void build_level(double seconds) {
     // Full-bright polygons (screens, lit signs) glow. A blank first layer says nothing
     // about the surface, so there the second layer's own flag counts.
     bool self_lit = second_is_surface ? r.overlay_unshaded : r.unshaded;
+    // Only a reflection, with nothing or just lines over it: a dark mirror, not a lamp.
+    bool mirror_base = r.env_mapped && !second_is_surface;
+    if (mirror_base) self_lit = false;
     // Water, by the mission file. Mirror-smooth with the engine's texture, or a see-through
     // skin: then only the side seen from the air is kept, the other would lie on top of it.
     int water = g_water_mode ? scene_water_at(r.start) : 0;
@@ -837,12 +886,18 @@ static void build_level(double seconds) {
     float lit_level = self_lit ? powf((float)tint_step / 16.0f, 2.2f) : 1.0f;   // to linear light, like everything the engine multiplies on screen
     uint64_t key = ((uint64_t)(uint32_t)(second_is_surface ? r.overlay_texture : r.texture) << 5) | (r.alpha_test ? 1 : 0) | (second_is_surface ? 2 : 0) |
                    (self_lit ? 4 : 0) | (water ? 8 : 0) | (skin ? 16 : 0) | ((uint64_t)(self_lit ? tint_step : 0) << 40);
+    key |= (uint64_t)(r.env_layer ? 1 : 0) << 46;
     if (skin) key = 0x57415445525f5348ull + (uint64_t)g_water_mode;   // one surface for all of it
+    if (mirror_base && !skin) {
+      uint32_t q = (uint32_t)(std::clamp(r.color[0], 0.0f, 1.0f) * 32.0f + 0.5f) << 16 | (uint32_t)(std::clamp(r.color[1], 0.0f, 1.0f) * 32.0f + 0.5f) << 8 |
+                   (uint32_t)(std::clamp(r.color[2], 0.0f, 1.0f) * 32.0f + 0.5f);
+      key = 0x4d49525200000000ull | q;
+    }
     SurfaceBuild& s = surfaces[key];
     if (!s.material)
-      s.material = skin ? water_material(g_water_mode == 3) :
+      s.material = skin ? water_material(g_water_mode == 3) : mirror_base ? mirror_material(r.color, 0.0f) :
                    material_for(main, r.alpha_test && !second_is_surface, r.color, self_lit, kSurface, screen_strength(g_emissive_light) * lit_level,
-                                water ? 2 : second_is_surface ? 1 : 0);
+                                water ? 2 : second_is_surface || r.env_layer ? 1 : 0);
     if (self_lit && main && g_emissive_light < 1.0f) {   // the rest of its brightness, for the eye only
       SurfaceBuild& lit = lit_layers[key];
       if (!lit.material) lit.material = material_for(main, false, r.color, true, kLit, screen_strength(1.0f - g_emissive_light) * lit_level);
@@ -871,6 +926,9 @@ static void build_level(double seconds) {
   unknown.material = material_for(nullptr, false, nullptr);
   for (size_t i = 0; i + 2 < w.indices.size(); i += 3) {
     if (covered[i]) continue;
+    // (An opening between two cells is no wall: until the engine draws it, as it does
+    // water, nothing stands there.)
+    if (scene_opening_at((uint32_t)i)) continue;
     for (int k : order) if (w.indices[i + k] < w.vertices.size()) add_index(unknown, w, w.indices[i + k]);
   }
 
@@ -1148,8 +1206,8 @@ static bool fit_to_baked(const LevelBvh& bvh, const std::vector<SceneLight>& lig
   if (!count) return false;
   // A polygon is sampled at the middle of each of its triangles: one point at its centre
   // overstates what a light close to it delivers to the whole of it.
-  struct Sample { float at[3]; float area; };
-  struct Poly { double c[3] = { 0, 0, 0 }; float n[3] = { 0, 0, 0 }; double area = 0.0; std::vector<Sample> samples; };
+  struct Sample { float at[3]; float area; float value[3]; };   // value: the steady lightmap there
+  struct Poly { double c[3] = { 0, 0, 0 }; float n[3] = { 0, 0, 0 }; double area = 0.0; std::vector<Sample> samples; bool fine = false; };
   std::vector<Poly> polys(count);
   for (size_t t = 0; t + 2 < w.indices.size(); t += 3) {
     uint32_t ia = w.indices[t], ib = w.indices[t + 1], ic = w.indices[t + 2];
@@ -1173,6 +1231,34 @@ static bool fit_to_baked(const LevelBvh& bvh, const std::vector<SceneLight>& lig
     }
   }
   for (Poly& q : polys) if (q.area > 0.0) for (int k = 0; k < 3; ++k) q.c[k] /= q.area;
+  // Better than triangle middles with the polygon's mean value: the lightmap's own texels,
+  // each where it lies on the polygon, with what the engine baked right there. A lamp
+  // close to a wall, a shadow's edge across a floor and a long corridor's far end then
+  // each count for what they are.
+  const MissionPolyLights& file = mission_poly_lights();
+  bool have_fine = g_fit_texels && file.sample_first.size() == count + 1;
+  size_t fine_polys = 0, fine_points = 0;
+  for (size_t j = 0; j < count; ++j) {
+    Poly& q = polys[j];
+    if (!(q.area > 0.0)) continue;
+    unsigned a = have_fine ? file.sample_first[j] : 0, b = have_fine ? file.sample_first[j + 1] : 0;
+    if (b > a && (size_t)b * 7 <= file.samples.size()) {
+      q.samples.clear();
+      for (unsigned sample_index = a; sample_index < b; ++sample_index) {
+        const float* f = &file.samples[(size_t)sample_index * 7];
+        Sample sample;
+        memcpy(sample.at, f, 12);
+        sample.area = (float)(q.area * f[3]);
+        memcpy(sample.value, f + 4, 12);
+        q.samples.push_back(sample);
+      }
+      q.fine = true;
+      ++fine_polys;
+      fine_points += b - a;
+    } else {
+      for (Sample& sample : q.samples) for (int c = 0; c < 3; ++c) sample.value[c] = baked.steady[j * 3 + c];
+    }
+  }
 
   // How much of the light that falls on a polygon's surroundings comes back off them: the
   // textures' average colour, in linear light, over the polygons of the same 12-unit block
@@ -1207,7 +1293,14 @@ static bool fit_to_baked(const LevelBvh& bvh, const std::vector<SceneLight>& lig
     level_weighted += polys[j].area * reflect[j];
     level_area += polys[j].area;
   }
-  float level_reflect = level_area > 0.0 ? (float)(level_weighted / level_area) : 0.35f;
+  // On a first visit few polygons' textures are known yet, and the few are whatever the
+  // player happened to face. So the level's average leans on a typical value (a tenth:
+  // these decks are dark metal) until a quarter of its area is known.
+  double all_area = 0.0;
+  for (size_t j = 0; j < count; ++j) all_area += polys[j].area;
+  double prior_area = 0.25 * all_area - level_area;
+  if (prior_area < 0.0) prior_area = 0.0;
+  float level_reflect = level_area + prior_area > 0.0 ? (float)((level_weighted + 0.10 * prior_area) / (level_area + prior_area)) : 0.10f;
   std::vector<float> share(count, 1.0f);
   double share_sum = 0.0, share_area = 0.0;
   for (size_t j = 0; j < count; ++j) {
@@ -1274,85 +1367,166 @@ static bool fit_to_baked(const LevelBvh& bvh, const std::vector<SceneLight>& lig
     return area > 0.0 ? (float)(total / area) : 0.0f;
   };
 
-  // Lights that change: each against its own layers.
-  std::vector<double> num(lights.size(), 0.0), den(lights.size(), 0.0);
+  // FitRule: 1 fits point by point (see below); 0 the light that shows over a lamp's whole
+  // area. Walked through all 23 decks both ways (PHASE1.md, Update 12): by area matched
+  // single rooms well but left more places too bright; point by point is the default.
+  static const int kFitRule = (int)config_number(L"FitRule", 1.0);
+  // Lights that change: each against its own layers. The same measure as below: what
+  // shows of the lamp over the points the engine lit with it adds up to what it baked.
+  struct LayerPoint { uint32_t light; float area, geo, cap, want[3]; };
+  std::vector<LayerPoint> layer_points;
   for (const BakedLayer& layer : baked.layers) {
     if (layer.light < 0 || (size_t)layer.light >= lights.size() || layer.polygon >= count) continue;
     const Poly& q = polys[layer.polygon];
     if (!(q.area > 0.0)) continue;
-    float geo = sends((size_t)layer.light, q, nullptr, nullptr);
-    for (int c = 0; c < 3; ++c) {
-      num[(size_t)layer.light] += q.area * wanted(layer.polygon, layer.mean[c]);
-      den[(size_t)layer.light] += q.area * geo * shade[(size_t)layer.light][c];
+    size_t li = (size_t)layer.light;
+    const float* values = nullptr;
+    if (q.fine && layer.entry < file.layer_sample_first.size()) {
+      size_t at = (size_t)file.layer_sample_first[layer.entry] * 3;
+      if (at + q.samples.size() * 3 <= file.layer_samples.size()) values = &file.layer_samples[at];
+    }
+    float cap = wanted(layer.polygon, 1.0f);
+    if (values) {
+      for (size_t k = 0; k < q.samples.size(); ++k) {
+        const float* v = values + k * 3;
+        if (v[0] + v[1] + v[2] < 0.006f) continue;   // the engine baked none of this lamp's light here: its shadow
+        LayerPoint point = { (uint32_t)li, q.samples[k].area, sends_at(li, q.samples[k].at, q.n), cap,
+                             { wanted(layer.polygon, v[0]), wanted(layer.polygon, v[1]), wanted(layer.polygon, v[2]) } };
+        layer_points.push_back(point);
+      }
+      continue;
+    }
+    LayerPoint point = { (uint32_t)li, (float)q.area, sends(li, q, nullptr, nullptr), cap,
+                         { wanted(layer.polygon, layer.mean[0]), wanted(layer.polygon, layer.mean[1]), wanted(layer.polygon, layer.mean[2]) } };
+    layer_points.push_back(point);
+  }
+  std::vector<double> num(lights.size(), 0.0), den(lights.size(), 0.0);
+  std::vector<float> layer_gain(lights.size(), 1.0f);
+  for (int round = 0; round < (kFitRule == 0 ? 24 : 1); ++round) {
+    std::fill(num.begin(), num.end(), 0.0);
+    std::fill(den.begin(), den.end(), 0.0);
+    for (const LayerPoint& point : layer_points)
+      for (int c = 0; c < 3; ++c) {
+        float have = layer_gain[point.light] * point.geo * shade[point.light][c];
+        if (kFitRule == 0 && have > point.cap) have = point.cap;
+        num[point.light] += (double)point.area * point.want[c];
+        den[point.light] += (double)point.area * have;
+      }
+    for (size_t i = 0; i < lights.size(); ++i) {
+      if (!changing[i] || !(den[i] > 0.0) || !(num[i] > 0.0)) continue;
+      float g = layer_gain[i] * (float)(num[i] / den[i]);
+      layer_gain[i] = g < 0.1f ? 0.1f : g > 12.0f ? 12.0f : g;
     }
   }
   unsigned fitted_changing = 0, fitted_steady = 0;
   for (size_t i = 0; i < lights.size(); ++i) {
     if (!changing[i] || !(den[i] > 0.0) || !(num[i] > 0.0)) continue;
-    float gain = (float)(num[i] / den[i]);
-    g_light_gain[i] = gain < 0.1f ? 0.1f : gain > 80.0f ? 80.0f : gain;
+    g_light_gain[i] = layer_gain[i];
     ++fitted_changing;
   }
 
-  // Lights that never change: all against the steady layer.
-  struct Entry { uint32_t polygon, light; float sends; };
+  // Lights that never change: all against the steady layer, point by point, each point
+  // with a ray to each light that could matter to it.
+  // The engine's values stop at white, and so does the screen: a point the lights send
+  // more than white is counted as white. A texel baked to full white says "at least this
+  // much"; but light far beyond white there is light the engine did not have bouncing
+  // round the room, and a glaring patch by every lamp, so past FitHeadroom times white
+  // (2) such a point does count against its lights. 0: never.
+  static const float kWhiteHeadroom = (float)config_number(L"FitHeadroom", 2.0);
+  struct Point { float area; float want[3]; bool white[3]; float cap; };
+  struct Entry { uint32_t point, light; float sends; };
+  std::vector<Point> points;
   std::vector<Entry> entries;
   size_t rays = 0;
   for (size_t j = 0; j < count; ++j) {
     const Poly& q = polys[j];
     if (!(q.area > 0.0) || steady[j * 3] < 0.0f) continue;
-    float origin[3] = { (float)q.c[0] + q.n[0] * 0.05f, (float)q.c[1] + q.n[1] * 0.05f, (float)q.c[2] + q.n[2] * 0.05f };
+    size_t first_point = points.size();
+    for (const Sample& sample : q.samples) {
+      Point point;
+      point.area = sample.area;
+      point.cap = wanted(j, 1.0f);   // white, at this point
+      for (int c = 0; c < 3; ++c) { point.want[c] = wanted(j, sample.value[c]); point.white[c] = sample.value[c] >= 0.97f; }
+      points.push_back(point);
+    }
     for (size_t i = 0; i < lights.size(); ++i) {
       if (changing[i] || !(x[i] > 0.0f)) continue;
-      float dir[3], dist = 0.0f;
-      float a = sends(i, q, dir, &dist);
-      if (a * x[i] < 0.003f) continue;
-      ++rays;
-      if (bvh.cast(origin, dir, dist - 0.1f) > 0.0f) continue;   // in its shadow
-      entries.push_back({ (uint32_t)j, (uint32_t)i, a });
+      if (sends(i, q, nullptr, nullptr) * x[i] < 0.003f) continue;
+      const remixapi_Float3D& at = g_light_shown[i];
+      for (size_t k = 0; k < q.samples.size(); ++k) {
+        const Sample& sample = q.samples[k];
+        float a = sends_at(i, sample.at, q.n);
+        if (!(a > 0.0f)) continue;
+        float origin[3] = { sample.at[0] + q.n[0] * 0.05f, sample.at[1] + q.n[1] * 0.05f, sample.at[2] + q.n[2] * 0.05f };
+        float dir[3] = { at.x - origin[0], at.y - origin[1], at.z - origin[2] };
+        float dist = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        if (dist > 1e-4f) for (int c = 0; c < 3; ++c) dir[c] /= dist;
+        ++rays;
+        if (dist > 0.2f && bvh.cast(origin, dir, dist - 0.1f) > 0.0f) continue;   // in its shadow
+        entries.push_back({ (uint32_t)(first_point + k), (uint32_t)i, a });
+      }
     }
   }
-  std::vector<float> gain(lights.size(), 1.0f), predicted(count * 3, 0.0f);
+  std::vector<float> gain(lights.size(), 1.0f), predicted(points.size() * 3, 0.0f);
   for (size_t i = 0; i < lights.size(); ++i) gain[i] = g_light_gain[i];
   double baked_total = 0.0, before = 0.0, after = 0.0;
   for (int round = 0; round <= 40; ++round) {
     std::fill(predicted.begin(), predicted.end(), 0.0f);
     for (const Entry& e : entries)
-      for (int c = 0; c < 3; ++c) predicted[e.polygon * 3 + c] += gain[e.light] * e.sends * shade[e.light][c];
+      for (int c = 0; c < 3; ++c) predicted[(size_t)e.point * 3 + c] += gain[e.light] * e.sends * shade[e.light][c];
     if (round == 0 || round == 40) {
       double total = 0.0;
       baked_total = 0.0;
-      for (size_t j = 0; j < count; ++j)
-        if (polys[j].area > 0.0 && steady[j * 3] >= 0.0f)
-          for (int c = 0; c < 3; ++c) { total += polys[j].area * predicted[j * 3 + c]; baked_total += polys[j].area * wanted(j, steady[j * 3 + c]); }
+      for (size_t k = 0; k < points.size(); ++k)
+        for (int c = 0; c < 3; ++c) {   // (what shows: light beyond white is not counted)
+          total += points[k].area * std::min(predicted[k * 3 + c], points[k].cap);
+          baked_total += points[k].area * points[k].want[c];
+        }
       (round == 0 ? before : after) = total;
       if (round == 40) break;
     }
     std::fill(num.begin(), num.end(), 0.0);
     std::fill(den.begin(), den.end(), 0.0);
     for (const Entry& e : entries) {
+      const Point& point = points[e.point];
       for (int c = 0; c < 3; ++c) {
-        float value = steady[e.polygon * 3 + c];
-        float target = wanted(e.polygon, value), have = predicted[e.polygon * 3 + c];
-        float ratio = have > 1e-6f ? target / have : 1.0f;
-        if (value >= 0.97f && ratio < 1.0f) ratio = 1.0f;   // full white: at least this much
-        double weight = polys[e.polygon].area * e.sends * shade[e.light][c];
-        num[e.light] += weight * ratio;
-        den[e.light] += weight;
+        float target = point.want[c], have = predicted[(size_t)e.point * 3 + c];
+        float shown = have < point.cap ? have : point.cap;
+        if (kFitRule == 0) {
+          // By light on show: over the area a lamp lights, what shows of it on screen adds
+          // up to what the engine baked there. Each point's light is shared among its
+          // lamps by what each sends. This is the measure a screenshot's mean takes.
+          if (!(have > 1e-9f)) continue;
+          double part = (double)point.area * (gain[e.light] * e.sends * shade[e.light][c] / have);
+          if (point.white[c] && shown > target) shown = kWhiteHeadroom > 0.0f && have > kWhiteHeadroom * point.cap ? have / kWhiteHeadroom : target;
+          num[e.light] += part * target;
+          den[e.light] += part * shown;
+        } else {
+          // By point: every point's own ratio, weighted by what the lamp sends it. The
+          // points nearest a lamp weigh most, so far walls err on the dark side.
+          float ratio = have > 1e-6f ? target / have : 1.0f;
+          if (point.white[c] && ratio < 1.0f) ratio = kWhiteHeadroom > 0.0f && have > kWhiteHeadroom * point.cap ? kWhiteHeadroom * point.cap / have : 1.0f;
+          ratio = ratio < 0.2f ? 0.2f : ratio > 5.0f ? 5.0f : ratio;
+          double weight = (double)point.area * e.sends * shade[e.light][c];
+          num[e.light] += weight * ratio;
+          den[e.light] += weight;
+        }
       }
     }
     for (size_t i = 0; i < lights.size(); ++i) {
       if (changing[i] || !(den[i] > 0.0)) continue;
-      float g = gain[i] * (float)(num[i] / den[i]);
-      gain[i] = g < 0.05f ? 0.05f : g > 80.0f ? 80.0f : g;
+      float step = (float)(num[i] / den[i]);
+      step = step < 0.5f ? 0.5f : step > 2.0f ? 2.0f : step;   // no round moves a light far
+      float g = gain[i] * step;
+      gain[i] = g < 0.05f ? 0.05f : g > 12.0f ? 12.0f : g;
     }
   }
+  std::vector<uint8_t> reached_light(lights.size(), 0);
+  for (const Entry& e : entries) reached_light[e.light] = 1;
   std::vector<float> all;
   for (size_t i = 0; i < lights.size(); ++i) {
     if (changing[i]) { if (den[i] > 0.0 || g_light_gain[i] != 1.0f) all.push_back(g_light_gain[i]); continue; }
-    bool reached = false;
-    for (const Entry& e : entries) if (e.light == i) { reached = true; break; }
-    if (!reached) continue;
+    if (!reached_light[i]) continue;
     g_light_gain[i] = gain[i];
     all.push_back(gain[i]);
     ++fitted_steady;
@@ -1371,10 +1545,10 @@ static bool fit_to_baked(const LevelBvh& bvh, const std::vector<SceneLight>& lig
   }
   std::sort(all.begin(), all.end());
   logf("remix: lights fitted to the engine's lightmaps: %u steady and %u changing ones (strength against the five-unit match: median %.2f, least %.2f, most %.1f); "
-       "%zu polygon-light pairs from %zu rays; light sent to the level was %.0f%% of the baked target before, %.0f%% after; "
+       "%zu point-light pairs from %zu rays, %zu of the polygons sampled at their lightmap's texels (%zu points); light sent to the level was %.0f%% of the baked target before, %.0f%% after; "
        "walls give back %.0f%% on average (known for %.0f%% of the area), so the lights supply %.0f%% of what was baked",
        fitted_steady, fitted_changing, all.empty() ? 1.0f : all[all.size() / 2], all.empty() ? 1.0f : all.front(), all.empty() ? 1.0f : all.back(),
-       entries.size(), rays, baked_total > 0.0 ? 100.0 * before / baked_total : 0.0, baked_total > 0.0 ? 100.0 * after / baked_total : 0.0,
+       entries.size(), rays, fine_polys, fine_points, baked_total > 0.0 ? 100.0 * before / baked_total : 0.0, baked_total > 0.0 ? 100.0 * after / baked_total : 0.0,
        100.0 * level_reflect, share_area > 0.0 ? 100.0 * level_area / share_area : 0.0, share_area > 0.0 ? 100.0 * share_sum / share_area : 0.0);
   return true;
 }
@@ -1822,6 +1996,13 @@ static const std::vector<Part>& parts_for(const ObjectDraw& d, bool glow_layer =
     uint8_t q[3] = { (uint8_t)(d.color[0] * 255.0f + 0.5f), (uint8_t)(d.color[1] * 255.0f + 0.5f), (uint8_t)(d.color[2] * 255.0f + 0.5f) };
     key = fnv1a64(q, sizeof q, key);
   }
+  bool mirror = d.env_mapped && !glow_layer && !lit_layer && !glass;
+  if (mirror) {
+    uint8_t q[4] = { (uint8_t)(d.color[0] * 32.0f + 0.5f), (uint8_t)(d.color[1] * 32.0f + 0.5f), (uint8_t)(d.color[2] * 32.0f + 0.5f), (uint8_t)(d.lod_bias * 2.0f + 0.5f) };
+    key = fnv1a64(q, sizeof q, key ^ 0x4d4952524f525f31ull);
+  }
+  bool polished = d.env_layer && !mirror;
+  key ^= polished ? 0x474c4f5353595f31ull : 0;
   auto it = g_parts.find(key);
   if (it != g_parts.end()) return it->second;
 
@@ -1855,12 +2036,14 @@ static const std::vector<Part>& parts_for(const ObjectDraw& d, bool glow_layer =
   // The glow layer is the same geometry again, as light added in proportion to the texture's alpha.
   remixapi_MaterialHandle material = lit_layer  ? material_for(tex, false, d.color, true, kLit, (1.0f - g_emissive_light) * object_lit)
                                      : glass      ? glass_material(d.color[3])
+                                     : mirror     ? mirror_material(d.color, d.lod_bias)
                                      : see_through ? material_for(tex, false, d.color, self_lit, kSeeThrough)
                                      // (a glow whose texture has no see-through parts is pure added light, not a covering)
                                      : glow_layer ? material_for(tex, false, d.color, true, tex && tex->has_mean && tex->mean_alpha > 0.9f ? kLit : kGlow,
                                                                  screen_strength((float)(uint32_t)(d.glow_strength * kGlowSteps + 0.5f) / kGlowSteps))
                                      : decal    ? material_for(tex, false, d.color, self_lit, kDecal)
-                                                : material_for(tex, d.alpha_test, d.color, self_lit, kSurface, self_lit ? g_emissive_light * object_lit : 1.0f);
+                                                : material_for(tex, d.alpha_test, d.color, self_lit, kSurface, self_lit ? g_emissive_light * object_lit : 1.0f,
+                                                               polished ? 1 : 0);
   for (auto& kv : groups) {
     Build& b = kv.second;
     remixapi_MeshInfoSurfaceTriangles t = {};
