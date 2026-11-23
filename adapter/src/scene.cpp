@@ -109,7 +109,7 @@ static void fail_once(const char* what) {
 static std::map<uint64_t, int> g_cached_texture_index;   // textures named in the level memory: hash -> record
 // Textures' rough average colours from earlier sessions (texture_means.txt beside the
 // texture cache), so that a texture only remembered, not yet drawn, has one too.
-struct RememberedMean { float rgb[3]; float alpha = 1.0f; };
+struct RememberedMean { float rgb[3]; float alpha = 1.0f; float peak = 1.0f; };
 static std::map<uint64_t, RememberedMean> g_remembered_means;
 static bool g_means_loaded;
 
@@ -123,7 +123,7 @@ static void load_remembered_means() {
   while (fgets(line, sizeof line, f)) {
     unsigned long long hash = 0;
     RememberedMean m;
-    if (sscanf(line, "%llx %f %f %f %f", &hash, &m.rgb[0], &m.rgb[1], &m.rgb[2], &m.alpha) == 5) g_remembered_means[hash] = m;   // older lines had no alpha: read again from the file
+    if (sscanf(line, "%llx %f %f %f %f %f", &hash, &m.rgb[0], &m.rgb[1], &m.rgb[2], &m.alpha, &m.peak) == 6) g_remembered_means[hash] = m;   // older lines had less: read again from the texture's file
   }
   fclose(f);
 }
@@ -167,14 +167,16 @@ static int texture_for(ID3D11DeviceContext* ctx, UINT slot = 0) {
     rec.has_mean = info.has_mean;
     memcpy(rec.mean_rgb, info.mean_rgb, sizeof rec.mean_rgb);
     rec.mean_alpha = info.mean_alpha;
+    rec.peak_alpha = info.peak_alpha;
     load_remembered_means();
     if (info.has_mean && !g_remembered_means.count(info.hash)) {
       RememberedMean m;
       memcpy(m.rgb, info.mean_rgb, sizeof m.rgb);
       m.alpha = info.mean_alpha;
+      m.peak = info.peak_alpha;
       g_remembered_means[info.hash] = m;
       FILE* f = _wfopen(means_file().c_str(), L"a");
-      if (f) { fprintf(f, "%016llx %.4f %.4f %.4f %.4f\n", (unsigned long long)info.hash, m.rgb[0], m.rgb[1], m.rgb[2], m.alpha); fclose(f); }
+      if (f) { fprintf(f, "%016llx %.4f %.4f %.4f %.4f %.4f\n", (unsigned long long)info.hash, m.rgb[0], m.rgb[1], m.rgb[2], m.alpha, m.peak); fclose(f); }
     }
     memcpy(rec.solid_rgba, info.solid_rgba, sizeof rec.solid_rgba);
     first_time_ever = !info.already_on_disk;
@@ -400,15 +402,21 @@ static void load_remembered_polygons() {
     rec.hash = hash;
     load_remembered_means();
     auto mean = g_remembered_means.find(hash);
-    float rgba[4];
-    if (mean != g_remembered_means.end()) { rec.has_mean = true; memcpy(rec.mean_rgb, mean->second.rgb, sizeof rec.mean_rgb); rec.mean_alpha = mean->second.alpha; }
-    else if (dds_rough_mean(rec.path, rgba)) {   // not met since that list was started: from its file in the cache
+    float rgba[5];
+    if (mean != g_remembered_means.end()) {
+      rec.has_mean = true;
+      memcpy(rec.mean_rgb, mean->second.rgb, sizeof rec.mean_rgb);
+      rec.mean_alpha = mean->second.alpha;
+      rec.peak_alpha = mean->second.peak;
+    } else if (dds_rough_mean(rec.path, rgba)) {   // not met since that list was started: from its file in the cache
       rec.has_mean = true;
       memcpy(rec.mean_rgb, rgba, sizeof rec.mean_rgb);
       rec.mean_alpha = rgba[3];
+      rec.peak_alpha = rgba[4];
       RememberedMean m;
       memcpy(m.rgb, rgba, sizeof m.rgb);
       m.alpha = rgba[3];
+      m.peak = rgba[4];
       g_remembered_means[hash] = m;
     }
     int index = -1;
@@ -722,6 +730,39 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
       // texture slot is left over from another draw and changes with the view. It says
       // nothing about this polygon, least of all that its texture is being swapped.
       if (r.env_mapped && r.last_view != nullptr) return;
+      // Does the engine slide this polygon's texture? Its matrix is looked at every frame
+      // once that is known, and now and then before (three different ones in a row of
+      // looks settle it: a single change is the engine correcting itself).
+      if (r.last_view != nullptr && (r.scrolling || ((g_frame + start) & 7) == 0)) {
+        WorldRange now;
+        read_polygon_constants(ctx, now);
+        uint64_t seen = fnv1a64(now.uv_matrix, sizeof now.uv_matrix, fnv1a64(now.scale, sizeof now.scale));
+        if (r.scrolling && (memcmp(now.color, r.color, sizeof r.color) != 0 || now.unshaded != r.unshaded)) {
+          memcpy(r.color, now.color, sizeof r.color);   // the engine fades such a layer in and out by its colour
+          r.unshaded = now.unshaded;
+          ++r.uv_serial;
+        }
+        if (seen != r.uv_seen) {
+          bool first = r.uv_seen == 0;
+          r.uv_seen = seen;
+          if (r.scrolling) {
+            memcpy(r.scale, now.scale, sizeof r.scale);
+            memcpy(r.uv_matrix, now.uv_matrix, sizeof r.uv_matrix);
+            ++r.uv_serial;
+          } else if (!first && ++r.uv_changes >= 3) {
+            r.scrolling = true;
+            memcpy(r.scale, now.scale, sizeof r.scale);
+            memcpy(r.uv_matrix, now.uv_matrix, sizeof r.uv_matrix);
+            ++r.uv_serial;
+            if (!r.animated) { r.animated = true; g_world.animated.push_back(r.start); }
+            ++g_world.revision;
+            static unsigned told = 0;
+            if (++told <= 16) logf("scene: level polygon at index %u has its texture slid across it; drawn separately, frame by frame", r.start);
+          }
+        } else if (!r.scrolling) {
+          r.uv_changes = 0;
+        }
+      }
       if (view == r.last_view) return;
       // The texture bound is not the one we last saw here. Either this polygon came from
       // an earlier session and is being confirmed, or the engine has swapped its texture.
@@ -775,6 +816,24 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
       }
       if (rebuild) ++g_world.revision;
       return;
+    }
+    if (r.scrolling) {
+      // A texture added on top as it is, with a matrix of its own: the second drifting layer.
+      int kind = blend_kind(ctx);
+      if (kind == 3) {
+        WorldRange now;
+        read_polygon_constants(ctx, now);
+        int t = now.env_mapped ? -1 : texture_for(ctx);
+        if (t >= 0) {
+          if (t != r.add_texture || memcmp(now.uv_matrix, r.add_uv_matrix, sizeof now.uv_matrix) != 0 || memcmp(now.scale, r.add_scale, sizeof now.scale) != 0) ++r.uv_serial;
+          r.add_texture = t;
+          r.add_frame = g_frame;
+          r.add_strength = std::max(now.color[0], std::max(now.color[1], now.color[2]));
+          memcpy(r.add_scale, now.scale, sizeof r.add_scale);
+          memcpy(r.add_uv_matrix, now.uv_matrix, sizeof r.add_uv_matrix);
+        }
+        return;
+      }
     }
     if (r.later_passes_checked >= 4 && r.glow_texture < 0) return;
     if (r.later_passes_checked < 255) ++r.later_passes_checked;
@@ -831,7 +890,12 @@ static void on_world_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
       if (now.env_mapped) return;   // a reflection added on top, not the glow
       const float* c = now.color;
       float strength = c[3] * (c[0] > c[1] ? (c[0] > c[2] ? c[0] : c[2]) : (c[1] > c[2] ? c[1] : c[2]));
-      if (r.glow_frame != g_frame || strength > r.glow_strength) r.glow_strength = strength;
+      if (r.glow_frame != g_frame || strength > r.glow_strength) {
+        r.glow_strength = strength;
+        // ...and its texture, where the engine runs through a set of them (pulses along a line).
+        int t = texture_for(ctx);
+        if (t >= 0 && t != r.glow_texture && !g_textures[t].uniform && !g_textures[t].solid) r.glow_texture = t;
+      }
       r.glow_frame = g_frame;
       return;
     }
@@ -1148,7 +1212,7 @@ static void on_object_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT
           // (Not one whose texture is see-through nearly everywhere: the engine scales the
           // layer by that alpha, so it adds next to nothing, whatever colour the texture holds.
           // The wall light panels of the Ops deck's dark corridors are such.)
-          bool faint = (d.additive || d.alpha_blend) && d.texture >= 0 && g_textures[d.texture].has_mean && g_textures[d.texture].mean_alpha < 0.03f;
+          bool faint = (d.additive || d.alpha_blend) && d.texture >= 0 && g_textures[d.texture].faint();
           bool lit_layer = (d.additive || d.alpha_blend) && (d.unshaded || d.illumination > 0.5f) && d.texture >= 0 && !g_textures[d.texture].solid &&
                            !g_textures[d.texture].uniform && !prev->blended && !faint;
           if (lit_layer) {

@@ -17,9 +17,14 @@ OUT = ROOT / 'run/survey'
 OUT.mkdir(parents=True, exist_ok=True)
 mission, spot, tag = sys.argv[1:4]
 extra = sys.argv[4:]
+start = 36.0   # --start=<seconds>: the first shot; later for decks that load slowly
+for x in list(extra):
+    if x.startswith('--start='):
+        start = float(x.split('=', 1)[1])
+        extra.remove(x)
 subprocess.run([sys.executable, str(ROOT / 'tools/tour.py'), mission, f'--at={spot}'], check=True, stdout=subprocess.DEVNULL)
 keys, shots = [], []
-t = 36.0
+t = start
 # Screenshot times count from launch and key times from the game's first frame, about a
 # second later, and a screenshot can lag: so each shot is taken a good two seconds after
 # the switch it depends on. Path tracing also needs over a second to settle after it is

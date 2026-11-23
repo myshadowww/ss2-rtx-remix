@@ -102,6 +102,7 @@ variables override it):
 | `FitTexels` | 1 | ...texel by texel, each where it lies on its polygon, with a shadow ray from every point (0: one mean value per polygon) |
 | `FitRule` | 1 | what the fit matches: 1 every point's own ratio, weighted by what the lamp sends it (the points nearest a lamp weigh most, far walls err dark); 0 the light that shows on screen over each lamp's whole area (brighter: more places came out too bright in the walk) |
 | `FitHeadroom` | 2 | a texel the engine baked to full white counts against its lamps once they send it this many times white (0: never; brighter lamps and rooms) |
+| `DarkEmitters` | 1 | surfaces the engine never shades (screens, signs, the black of a grid room) give light off and throw none back, as in the engine (0: they also reflect the room's lamps) |
 | `LinearLightColour` | 1 | convert light colours to linear light so coloured lights tint as strongly as the engine's |
 | `StandOff` | 1 | move lights that sit close to a wall a little way out from it, so the wall gets a soft glow as in the engine, not a small bright disc |
 | `Sprites` | 1 | put the engine's particles, sparks and coronas into the path-traced scene (they are drawn before the point where the path-traced image replaces the engine's, so otherwise they are lost) |
@@ -170,7 +171,10 @@ coloured and dark ones matt; raised parts smoother than seams), writes them to
 `ss2rtx/authored/` and adds a marked block of lines to `materials.txt`. Screens, signs,
 cut-outs and small textures are left alone. Lines of your own after the block win, and a
 line replaces the whole entry for its texture. Run it again after visiting new decks. It
-needs numpy and Pillow. It is a guess from colour, not art: where a texture has painted
+needs numpy and Pillow. `materials/handmade.txt` in the repository holds roughness and metalness chosen by hand
+for the 46 surfaces that cover most of the decks; the script uses those values for them
+(`--hand-only` writes just those, with no maps). For everything else it
+is a guess from colour, not art: where a texture has painted
 shadows the relief is wrong, and you can delete that line. The maps are in the formats
 Remix reads natively: normals as two-channel octahedral BC5, roughness as BC4.
 
@@ -195,6 +199,8 @@ Remix reads natively: normals as two-channel octahedral BC5, roughness as BC4.
     python3 tools/tour.py off
     python3 tools/tour.py medsci2 --at=-12,-190,2,0        # ...with the player put at that spot, facing 0 degrees
     python3 tools/survey.py medsci2 -12,-190,2,0 icu       # same four views path traced and engine, into run/survey/
+    python3 tools/survey.py shodan -101,159,-233,0 grid --start=46   # ...first shot later, for decks that load slowly
+    python3 launch.py --scenario tour --split --seconds 60 --screenshot-at 50   # engine left, path traced right, in one frame: for anything that moves
     python3 tools/author.py                                # normal and roughness maps for the private copy's textures (see Tuning materials)
     python3 tools/steam_game_running.py && echo "the Steam copy is running"
     python3 tools/walk.py                                  # three places in each of the 23 decks, both renderers, into run/walk/ (75 minutes)
@@ -244,6 +250,7 @@ anything heavy on the disk at the same time: the menu keys are timed.
   the rest stand in as plain grey until seen (they are remembered in `ss2rtx_cache` from
   then on). This build starts those files afresh.
 - `Skip=<letters>` in `ss2rtx.ini` leaves parts of the scene out of the path-traced image
-  (o objects, l lights, c characters): for finding where something on screen comes from.
+  (o objects, l lights, c characters, u level polygons the engine has not drawn yet): for
+  finding where something on screen comes from.
 - Every mission loads and renders, and a script has looked at three places in each
   (`tools/walk.py`). Nobody has played a level through this way.

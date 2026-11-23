@@ -21,6 +21,13 @@ struct SceneTexture {
   bool has_mean = false;           // a rough average colour is known (not for textures only remembered from an earlier run)
   float mean_rgb[3] = { 0.5f, 0.5f, 0.5f };
   float mean_alpha = 1.0f;         // near 1: an opaque texture; low: mostly see-through (a mask, or a faint layer)
+  float peak_alpha = 1.0f;         // its most opaque texel
+  // A layer of it adds next to nothing: see-through nearly everywhere. (The engine adds
+  // such a layer as displayed, where a fiftieth of opacity is a fiftieth of brightness;
+  // added as light it would show as a sixth, over the whole part.) `lines`: unless it has
+  // solid texels, as a texture of thin bright lines does; only asked where that is known
+  // to be what the layer is.
+  bool faint(bool lines = false) const { return has_mean && mean_alpha < 0.03f && !(lines && peak_alpha >= 0.3f); }
 };
 
 // One world polygon as the engine draws it: a run of indices with one texture.
@@ -44,6 +51,20 @@ struct WorldRange {
   // The engine swaps the texture of some polygons while they are on show (screens).
   // Those are kept out of the level mesh and drawn as small meshes of their own.
   bool animated = false;
+  // ...and slides the texture of others across them from frame to frame (a plasma floor,
+  // running water): its texture matrix changes. Such a polygon is also kept out of the
+  // level mesh, and drawn each frame with the matrix of the moment. `add_*`: a second
+  // copy of a texture the engine adds on top with a matrix of its own (two layers drifting
+  // across each other is how it makes plasma), as drawn in frame `add_frame`.
+  bool scrolling = false;
+  uint8_t uv_changes = 0;
+  uint64_t uv_seen = 0;              // the texture matrix last looked at, hashed
+  uint32_t uv_serial = 0;            // bumps when uv_matrix or add_uv_matrix changes
+  int add_texture = -1;
+  uint64_t add_frame = ~0ull;
+  float add_strength = 1.0f;         // that pass's colour, brightest channel
+  float add_scale[2] = { 1, 1 };
+  float add_uv_matrix[12] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
   const void* last_view = nullptr;   // identity of the texture view last seen; never dereferenced
   uint64_t seen_frame = ~0ull;       // frame of the latest draw, to tell a second pass from a new frame
   uint8_t later_passes_checked = 0;

@@ -162,6 +162,51 @@ static bool rough_mean(const std::vector<uint8_t>& mip, unsigned unit, int forma
   return true;
 }
 
+// The alpha of a level's most opaque texel, near enough (for block formats: of its block
+// ends). A texture of thin lines is see-through nearly everywhere and yet not faint.
+static float peak_alpha(const std::vector<uint8_t>& mip, int format) {
+  bool bc3 = format >= 76 && format <= 78, bc2 = format >= 73 && format <= 75, bc7 = format >= 97 && format <= 99;
+  bool rgba8 = format >= 27 && format <= 29, bgra8 = format == 87 || format == 90 || format == 91;
+  unsigned peak = 0;
+  if (bc3) {
+    for (size_t at = 0; at + 16 <= mip.size(); at += 16) { unsigned a = mip[at] > mip[at + 1] ? mip[at] : mip[at + 1]; if (a > peak) peak = a; }
+    return peak / 255.0f;
+  }
+  if (bc2) {
+    for (size_t at = 0; at + 16 <= mip.size(); at += 16)
+      for (int i = 0; i < 8; ++i) { unsigned a = (mip[at + i] & 15) > (mip[at + i] >> 4) ? (mip[at + i] & 15) : (mip[at + i] >> 4); if (a * 17 > peak) peak = a * 17; }
+    return peak / 255.0f;
+  }
+  if (rgba8 || bgra8) {
+    for (size_t at = 3; at < mip.size(); at += 4) if (mip[at] > peak) peak = mip[at];
+    return peak / 255.0f;
+  }
+  if (bc7) {
+    static const int head[8] = { 5, 8, 9, 10, 8, 8, 7, 14 }, bits[8] = { 4, 6, 5, 7, 5, 7, 7, 5 }, ends[8] = { 6, 4, 6, 4, 2, 2, 2, 4 };
+    static const int alpha_bits[8] = { 0, 0, 0, 0, 6, 8, 7, 5 };
+    float best = 0.0f;
+    for (size_t at = 0; at + 16 <= mip.size(); at += 16) {
+      const uint8_t* b = mip.data() + at;
+      int mode = 0;
+      while (mode < 8 && !(b[0] >> mode & 1)) ++mode;
+      if (mode >= 8) continue;
+      if (!alpha_bits[mode]) return 1.0f;   // a block with no alpha is opaque
+      auto field = [&](int first, int count) {
+        unsigned v = 0;
+        for (int i = 0; i < count; ++i) v |= (unsigned)(b[(first + i) >> 3] >> ((first + i) & 7) & 1) << i;
+        return v;
+      };
+      int first = head[mode] + 3 * ends[mode] * bits[mode];
+      for (int e = 0; e < ends[mode]; ++e) {
+        float a = field(first + e * alpha_bits[mode], alpha_bits[mode]) / (float)((1 << alpha_bits[mode]) - 1);
+        if (a > best) best = a;
+      }
+    }
+    return best;
+  }
+  return 1.0f;
+}
+
 bool dds_rough_mean(const std::wstring& path, float* rgba) {
   FILE* f = _wfopen(path.c_str(), L"rb");
   if (!f) return false;
@@ -173,16 +218,20 @@ bool dds_rough_mean(const std::wstring& path, float* rgba) {
   bool block = false;
   if (ok) format_layout((DXGI_FORMAT)format, &unit, &block);
   ok = ok && unit && width && height && levels && width <= 16384 && height <= 16384;
-  std::vector<uint8_t> mip;
+  std::vector<uint8_t> mip, full;
   if (ok) {
     // Skip to a mip of 16 texels a side, or the smallest there is.
     unsigned pick = 0;
     while (pick + 1 < levels && ((width >> pick) > 16 || (height >> pick) > 16)) ++pick;
     long offset = 148;
-    for (unsigned m = 0; m <= pick; ++m) {
+    for (unsigned m = 0; m <= pick && ok; ++m) {
       unsigned w = width >> m ? width >> m : 1, h = height >> m ? height >> m : 1;
       size_t bytes = block ? (size_t)((w + 3) / 4) * ((h + 3) / 4) * unit : (size_t)w * h * unit;
-      if (m == pick) {
+      if (m == 0) {   // the full-size image, for its most opaque texel
+        full.resize(bytes);
+        ok = fseek(f, offset, SEEK_SET) == 0 && fread(full.data(), 1, bytes, f) == bytes;
+      }
+      if (m == pick && ok) {
         mip.resize(bytes);
         ok = fseek(f, offset, SEEK_SET) == 0 && fread(mip.data(), 1, bytes, f) == bytes;
       }
@@ -190,7 +239,9 @@ bool dds_rough_mean(const std::wstring& path, float* rgba) {
     }
   }
   fclose(f);
-  return ok && rough_mean(mip, unit, format, rgba);
+  if (!ok || !rough_mean(mip, unit, format, rgba)) return false;
+  rgba[4] = peak_alpha(full, format);
+  return true;
 }
 
 bool dump_texture_dds(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, DXGI_FORMAT view_format,
@@ -238,6 +289,7 @@ bool dump_texture_dds(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture
     float rgba[4];
     info->has_mean = rough_mean(mips[pick], unit, (int)d.Format, rgba);
     if (info->has_mean) { memcpy(info->mean_rgb, rgba, sizeof info->mean_rgb); info->mean_alpha = rgba[3]; }
+    info->peak_alpha = peak_alpha(mips[0], (int)d.Format);
   }
   int fid = (int)d.Format;
   bool rgba8 = fid >= 27 && fid <= 29, bgra8 = fid == 87 || fid == 88 || (fid >= 90 && fid <= 93);

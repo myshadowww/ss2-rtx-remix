@@ -57,7 +57,8 @@ options. `USAGE.md` has the keys, every setting, material overrides and logs.
 - Particles and sparks with the engine's own blend and per-vertex colour; water surfaces
   (mirror-smooth, a see-through skin, or a boundary that bends light).
 - Screens, lit signs, glow layers, decals, see-through surfaces, the sky box through
-  windows. Surfaces the engine paints a canned reflection on (its cube-map passes) are
+  windows. Textures the engine slides across a surface (the plasma floors of the last
+  level, two layers drifting over each other) move as they do in the engine. Surfaces the engine paints a canned reflection on (its cube-map passes) are
   polished or mirror surfaces here and reflect the room.
 - The game's HUD, weapon, menus, saves and input, untouched.
 - An in-game settings panel (F11): path tracing on/off, upscaler and DLSS mode, ray
@@ -67,9 +68,11 @@ options. `USAGE.md` has the keys, every setting, material overrides and logs.
   light levels. Changing the resolution in the game's options works while path tracing. Scroll Lock switches between path traced and the
   engine's renderer at any time.
 - A material override table (`ss2rtx/materials.txt`, reloaded live) for roughness,
-  metalness, normal and height maps per texture, and a script (`tools/author.py`) that
-  fills it with a starter set: a normal map and a roughness map worked out from each of
-  the game's textures on your machine.
+  metalness, normal and height maps per texture; values chosen by hand for the 46
+  surfaces that cover most of the decks (`materials/handmade.txt`: which are steel,
+  enamel, flesh, carpet, rubber); and a script (`tools/author.py`) that merges those with
+  a normal map and a roughness map worked out from each of the game's textures on your
+  machine.
 - Installer and uninstaller with a manifest and backups; a launcher for a private test
   copy that always closes what it started; scripted test runs, a screenshot regression
   check, a 23-mission sweep and a tool that renders the same views both ways for
@@ -87,10 +90,11 @@ DLSS Performance. The game stays at its 120 fps cap at 720p and 1080p.
   little weaker than the engine's.
 - The engine's view-dependent "incidence" maps (a part's colour and opacity by viewing
   angle and distance) are applied as their average only.
-- Glowing surfaces light what is round them, which the engine's did not: the training
-  level's grid rooms have a faint blue wash on walls the engine leaves black.
-- No hand-made materials. Without the generated starter set every surface has one default
-  roughness; with it, relief and gloss are a guess from each texture's colour.
+- Where the engine adds a faint layer as displayed, the same layer added as light is far
+  brighter (a fiftieth of opacity shows as a sixth). Such layers are left out or cut; the
+  thin grid lines over a lit plasma floor are among what is lost.
+- Materials are a start: roughness and metalness by hand for 46 surfaces, relief and the
+  rest a guess from each texture's colour. None is installed unless you run the script.
 - Remix's replacement mods (the RTX Remix Toolkit workflow) do not apply to content
   submitted through the API in runtime 1.6.1, so the Toolkit cannot be used to author
   for this. The override table is the authoring route.
@@ -189,6 +193,10 @@ Other findings worth knowing if you build on the Remix API:
   with `CubeMap` set samples the cube map (slot 4) by the mirrored view direction; slot 0
   still holds whatever the draw before left there. Reading it as the surface's texture
   gave lit walls that were not there, and "texture-swapping" polygons that were not.
+- **A black non-metal still shines.** A surface the game never shades (a screen, the
+  black between a grid's lines) must give back no light at all, and albedo zero is not
+  enough: a dielectric returns a twenty-fifth as sheen, which over a room of such walls
+  was a wash of the lamps' colour. Black and metallic is truly dark.
 - **Alpha-tested "decals" are only decals if the material blends**, and emissive blended
   layers go to the unordered acceleration structure.
 - Remix's default auto-exposure and local tone mapper brighten dark rooms considerably.

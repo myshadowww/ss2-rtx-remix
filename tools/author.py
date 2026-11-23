@@ -18,7 +18,12 @@ Run it again after playing further: decks you have not visited yet have textures
 not seen. The maps are made on your machine from your copy of the game; none are part of
 this project. Needs numpy and Pillow.
 
-This is a starting point, not art: relief guessed from colour is wrong wherever a texture
+materials/handmade.txt in this repository holds values chosen by hand for the textures
+that cover most of the decks (what each surface is: steel, enamel, flesh, carpet). They
+are merged in: a texture listed there gets its roughness and metalness from the table and
+its relief from the script. --hand-only writes those values alone, with no maps.
+
+For the rest this is a starting point, not art: relief guessed from colour is wrong wherever a texture
 has painted shadows or writing. Edit or delete single lines of the generated block as you
 see fit (a line of your own for the same texture, after the block, replaces it).
 """
@@ -98,7 +103,19 @@ def mip_chain(a):
     return levels
 
 
-def maps_for(image, relief):
+def hand_table():
+    """hash -> (roughness, metallic) from materials/handmade.txt."""
+    table = {}
+    path = ROOT / 'materials/handmade.txt'
+    if path.exists():
+        for line in path.read_text().splitlines():
+            parts = line.split('#')[0].split()
+            if len(parts) == 3:
+                table[parts[0].lower()] = (float(parts[1]), float(parts[2]))
+    return table
+
+
+def maps_for(image, relief, base=None):
     """(normal map as two octahedral channels, roughness map, note) or (None, None, why not)."""
     rgba = np.asarray(image.convert('RGBA'), dtype=np.float32) / 255.0
     h, w = rgba.shape[:2]
@@ -139,12 +156,15 @@ def maps_for(image, relief):
     normal = np.stack([(px + py) * 0.5 + 0.5, (px - py) * 0.5 + 0.5], axis=2)
     # Roughness: grey, pale surfaces read as painted metal or plastic (smoother); coloured
     # and dark ones as matt. Raised parts are worn smoother, seams hold dirt.
-    base = 0.5 if saturation < 0.12 else 0.62 if saturation < 0.25 else 0.78
-    if float(lum.mean()) < 0.1:
-        base = max(base, 0.65)
+    note = 'chosen by hand'
+    if base is None:
+        note = 'guessed'
+        base = 0.5 if saturation < 0.12 else 0.62 if saturation < 0.25 else 0.78
+        if float(lum.mean()) < 0.1:
+            base = max(base, 0.65)
     rough = np.clip(base - 0.16 * height, 0.25, 0.95)
     to8 = lambda a: np.rint(np.clip(a, 0.0, 1.0) * 255.0).astype(np.uint8)
-    return to8(normal), to8(rough), f'base roughness {base:.2f}'
+    return to8(normal), to8(rough), f'base roughness {base:.2f}, {note}'
 
 
 def strip_block(text):
@@ -162,6 +182,7 @@ def main():
     p.add_argument('--remove', action='store_true', help='remove the generated maps and lines')
     p.add_argument('--relief', type=float, default=0.12, help='how strong the relief is: the typical slope (default 0.12)')
     p.add_argument('--only', nargs='*', help='texture hashes to (re)make; default: all')
+    p.add_argument('--hand-only', action='store_true', help='only the values of materials/handmade.txt, no generated maps')
     a = p.parse_args()
     game = install.find_game() if a.steam else (a.target.resolve() if a.target else ROOT / 'game')
     if not game or not (game / 'SystemShock2Remastered.exe').exists():
@@ -175,6 +196,14 @@ def main():
             table.write_text(own)
         print(f'removed the generated maps and lines from {game / "ss2rtx"}')
         return
+    hand = hand_table()
+    if a.hand_only:
+        shutil.rmtree(out, ignore_errors=True)
+        lines = [f'{h.upper()} roughness={r:g} metallic={m:g}' for h, (r, m) in sorted(hand.items())]
+        (game / 'ss2rtx').mkdir(exist_ok=True)
+        table.write_text('\n'.join([BEGIN, *lines, END]) + '\n' + ('\n' + own if own.strip() else ''))
+        print(f'{len(lines)} hand-made material lines written to {table}')
+        return
     cache = game / 'ss2rtx_cache/textures'
     files = sorted(cache.glob('*.dds'))
     if not files:
@@ -185,9 +214,10 @@ def main():
     for n, f in enumerate(files):
         name = f.stem.lower()
         normal_file, rough_file = out / f'{name}_n.dds', out / f'{name}_r.dds'
+        metal = f' metallic={hand[name][1]:g}' if name in hand and hand[name][1] > 0 else ''
         if wanted is not None and name not in wanted:
             if normal_file.exists() and rough_file.exists():
-                lines.append(f'{name.upper()} normal=authored\\{name}_n.dds roughness_tex=authored\\{name}_r.dds')
+                lines.append(f'{name.upper()} normal=authored\\{name}_n.dds roughness_tex=authored\\{name}_r.dds{metal}')
             continue
         try:
             image = Image.open(f)
@@ -195,13 +225,15 @@ def main():
         except Exception as error:   # a format Pillow cannot read
             skipped['unreadable'] = skipped.get('unreadable', 0) + 1
             continue
-        normal, rough, note = maps_for(image, a.relief)
+        normal, rough, note = maps_for(image, a.relief, hand[name][0] if name in hand else None)
         if normal is None:
+            if name in hand:   # no maps for it, but its values are known
+                lines.append(f'{name.upper()} roughness={hand[name][0]:g} metallic={hand[name][1]:g}   # chosen by hand')
             skipped[note] = skipped.get(note, 0) + 1
             continue
         write_dds(normal_file, mip_chain(normal), DXGI_BC5)
         write_dds(rough_file, mip_chain(rough), DXGI_BC4)
-        lines.append(f'{name.upper()} normal=authored\\{name}_n.dds roughness_tex=authored\\{name}_r.dds   # {note}')
+        lines.append(f'{name.upper()} normal=authored\\{name}_n.dds roughness_tex=authored\\{name}_r.dds{metal}   # {note}')
         if sys.stdout.isatty():
             print(f'\r{n + 1} of {len(files)}', end='', flush=True)
     if sys.stdout.isatty():

@@ -1,0 +1,51 @@
+# Materials chosen by hand for the textures that cover most of the decks: what each
+# surface is, how rough, how much a metal. One line per texture, by the hash the adapter
+# names it with (the .dds files in ss2rtx_cache/textures). tools/author.py merges this
+# table into the maps it makes; these values win over its own guess.
+# hash              roughness  metallic   # what it is
+81F4D93705C6B090  0.30       0.0        # glazed blue tiles
+8EFA1214278B7E6A  0.55       0.0        # dark painted wall panels
+777C35D2A1489D63  0.50       0.0        # grey wall panels
+86FD949850F3CC5D  0.35       0.0        # pale flesh, wet
+ED16A1B4075E6BF0  0.55       0.0        # dark grey panels
+DED6E0BC941B90CD  0.30       0.0        # red flesh, wet
+B90A6847E36A7231  0.35       0.0        # white enamelled lab panels
+055C5CFB73816521  0.45       0.0        # grey lockers
+466F7DBF107F9C14  0.30       0.0        # red flesh, wet
+2A247926307387AD  0.38       0.7        # brushed steel panel
+DC2D0E35A427B0C9  0.50       0.0        # grey wall panels
+666801DA6D88AB25  0.60       0.0        # black
+31083D94B3934053  0.35       0.7        # steel column
+1A79120AFD02448B  0.35       0.6        # bright steel panels
+DDE8380809252BB7  0.45       0.0        # yellow paint
+57622CBAC731E426  0.30       0.0        # white gloss panels
+C338807C8ED16EAA  0.50       0.0        # dark machinery
+42539CA83992B424  0.30       0.0        # red flesh, wet
+21F4A80A2BA552B9  0.25       0.0        # teal membrane, wet
+60C93A9CCAD3F649  0.30       0.0        # red flesh, wet
+55C0A0E40DE2AF13  0.50       0.5        # dark vent panel
+7AD7A43AC83C3EFB  0.35       0.0        # dark red tissue
+35E7FB012D11FCEF  0.45       0.7        # floor grating
+1C25053AEC69B2E9  0.35       0.0        # teal medical panels
+4EF554D5ED2F3491  0.95       0.0        # blue carpet
+74918C949EEA0417  0.50       0.0        # grey machinery panels
+37B4530F5C7CF732  0.30       0.8        # steel tube
+EEE053ACB70629E3  0.60       0.0        # dark blue-grey plain wall
+B0600BDA31766140  0.45       0.0        # grey lockers
+08C1A08E8FC1231A  0.80       0.0        # dark rubber or concrete
+C6B684BA709F5EED  0.85       0.0        # concrete
+C440D8122A08FB88  0.85       0.0        # concrete with bolt holes
+9EEC58EE0ACEBDD2  0.50       0.0        # dark machinery
+E5373F9EFFAA693F  0.50       0.0        # grey-blue panels
+512E29E334F4B97E  0.35       0.0        # veined flesh
+D2C897CA65FB09B3  0.50       0.0        # hazard stripes, painted
+988FAF19F19A6A5D  0.60       0.0        # dark grey plain
+7F2FF5451F6B1CE3  0.70       0.0        # white plaster
+DB12352D5238536B  0.50       0.0        # white plain
+6E192031C9613EA7  0.60       0.0        # beige stone tiles
+D40B089ECD616BEC  0.60       0.0        # hazard stripes, worn
+08E5E26A12B097F8  0.30       0.0        # red flesh, wet
+4CA87BA9724C92E8  0.70       0.0        # dark rubber floor tiles
+C10A3FC9FF4341D0  0.40       0.7        # metal deck plate
+EBB01B48E110A1FE  0.45       0.0        # grey-blue panel with handles
+74E208511F495CF3  0.75       0.0        # black rubber tiles

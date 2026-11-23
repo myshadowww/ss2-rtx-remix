@@ -95,6 +95,8 @@ static bool g_sky = true;             // the engine's sky box is sent to Remix
 static bool g_stand_off = true;       // lights close to a wall are moved out from it; see place_lights()
 static bool g_fit_lights = true;      // each light's strength is fitted to the room it lights; see place_lights()
 static bool g_linear_light_colour = true;   // light colours are taken from display space to linear light; see make_light()
+static bool g_skip_unseen = false;    // debug (Skip=u): polygons the engine has not drawn yet are left out, not grey
+static bool g_dark_emitters = true;   // full-bright surfaces reflect no light, as in the engine (DarkEmitters)
 static bool g_fit_texels = true;      // ...and those lightmaps point by point, not as one mean per polygon (FitTexels)
 static bool g_fit_baked = true;       // ...against the engine's own lightmaps where the mission file gives them; see fit_to_baked()
 static int g_water_mode = 1;          // water surfaces: 0 as the engine textures them, 1 the same but mirror-smooth, 2 a see-through skin, 3 a boundary that bends light
@@ -238,6 +240,8 @@ static bool start() {
   g_fit_lights = config_flag(L"FitLights", true);
   g_fit_baked = config_flag(L"FitLightmaps", true);
   g_fit_texels = config_flag(L"FitTexels", true);
+  g_dark_emitters = config_flag(L"DarkEmitters", true);
+  g_skip_unseen = config_text(L"Skip").find(L'u') != std::wstring::npos;
   g_linear_light_colour = config_flag(L"LinearLightColour", true);
   g_sprites = config_flag(L"Sprites", true);
   g_sprite_vertex_colour = config_flag(L"SpriteVertexColour", true);
@@ -363,11 +367,15 @@ static void refresh_overrides(double seconds) {
 // alpha given per instance (see_through_blend()).
 // kLit: the for-the-eye part of a self-lit surface; its light is added whatever the
 // texture's alpha says.
-enum MaterialLayer { kSurface = 0, kDecal = 1, kGlow = 2, kSeeThrough = 3, kLit = 4 };
+// kLines: a decal that is mostly see-through (grid lines, lettering). The engine lays it
+// on in display values, where a tenth of opacity is a tenth of brightness; laid on in
+// linear light the same tenth shows as a third, and a whole wall of faint texels becomes
+// a wash of the lines' colour. So its faintest texels (under a tenth) are cut away.
+enum MaterialLayer { kSurface = 0, kDecal = 1, kGlow = 2, kSeeThrough = 3, kLit = 4, kLines = 5 };
 
 // `glossy`: 0 no; 1 a surface the engine fakes a reflection on (polished panels); 2 water.
 static remixapi_MaterialHandle material_for(const SceneTexture* tex, bool alpha_test, const float* color, bool emissive = false,
-                                            MaterialLayer layer = kSurface, float strength = 1.0f, int glossy = 0) {
+                                            MaterialLayer layer = kSurface, float strength = 1.0f, int glossy = 0, bool unlit = false) {
   if (layer == kGlow || layer == kLit) emissive = true;
   if (layer != kSurface) alpha_test = false;
   bool textured = tex && !tex->solid && !tex->path.empty();
@@ -386,6 +394,10 @@ static remixapi_MaterialHandle material_for(const SceneTexture* tex, bool alpha_
     key = fnv1a64(tag, sizeof tag, key);
   }
   key ^= glossy == 1 ? 0x474c4f5353595f31ull : glossy == 2 ? 0x57415445525f5f31ull : 0;
+  // `unlit`: the engine does not shade this surface at all (and it may be dark: a lamp
+  // that is off, the black between a grid's lines).
+  unlit = g_dark_emitters && (unlit || emissive) && layer == kSurface && !alpha_test;
+  key ^= unlit ? 0x554e4c49545f5f31ull : 0;
   const MaterialOverride* ov = &g_override_default;
   if (textured) {
     auto o = g_overrides.find(tex->hash);
@@ -414,7 +426,10 @@ static remixapi_MaterialHandle material_for(const SceneTexture* tex, bool alpha_
   opaque.metallicTexture = ov->metallic_tex.c_str();
   opaque.heightTexture = ov->height.c_str();
   opaque.displaceIn = ov->displace;
-  if (alpha_test && textured) {
+  if (layer == kLines && textured) {
+    opaque.alphaTestType = 4;
+    opaque.alphaReferenceValue = 26;
+  } else if (alpha_test && textured) {
     opaque.alphaTestType = 4;            // AlphaTestType::kGreater: keep texels above the reference
     opaque.alphaReferenceValue = 127;
   } else {
@@ -433,6 +448,20 @@ static remixapi_MaterialHandle material_for(const SceneTexture* tex, bool alpha_
   info.pNext = &opaque;
   info.hash = key;
   info.albedoTexture = !ov->albedo.empty() ? ov->albedo.c_str() : textured ? tex->path.c_str() : L"";
+  // A full-bright surface shows its texture whatever light falls on it: in the engine it
+  // takes none. So here it only gives light off and throws none back; else a lit sign
+  // under a lamp is brighter than the engine's, and a room walled in glowing lines is
+  // washed in their colour. (A cut-out keeps its texture: its shape is in the alpha.)
+  if (unlit && ov->albedo.empty()) {
+    // (Black, and a metal: a black non-metal still gives back a twenty-fifth of the
+    // light as sheen, which over a whole black room is the wash again.)
+    info.albedoTexture = L"";
+    opaque.albedoConstant = { 0.0f, 0.0f, 0.0f };
+    opaque.metallicConstant = 1.0f;
+    opaque.roughnessConstant = 1.0f;
+    opaque.roughnessTexture = L"";
+    opaque.metallicTexture = L"";
+  }
   info.normalTexture = ov->normal.c_str();
   info.tangentTexture = L"";
   // Full-bright engine materials (lamps, screens) glow with their own colour.
@@ -615,9 +644,63 @@ static void add_index(SurfaceBuild& s, const World& w, uint32_t vi, const float*
 // texture, made the first time that pairing is shown and kept.
 static std::map<std::pair<uint32_t, uint64_t>, remixapi_MeshHandle> g_animated_meshes;
 
+static void drop_scroll_meshes();
 static void drop_animated_meshes() {
   for (auto& kv : g_animated_meshes) if (kv.second) g_api.DestroyMesh(kv.second);
   g_animated_meshes.clear();
+  drop_scroll_meshes();
+}
+
+// A polygon whose texture the engine slides across it: a black floor under it that stays,
+// and the texture as a layer of light rebuilt whenever its matrix has moved (and the
+// second layer the engine adds, likewise). One small mesh a layer, replaced as it changes.
+struct ScrollMesh { remixapi_MeshHandle mesh = nullptr; uint32_t serial = ~0u; uint64_t texture = 0; };
+static std::map<uint64_t, ScrollMesh> g_scroll_meshes;
+
+static void drop_scroll_meshes() {
+  for (auto& kv : g_scroll_meshes) if (kv.second.mesh) g_api.DestroyMesh(kv.second.mesh);
+  g_scroll_meshes.clear();
+}
+
+static void submit_scroll_layer(const World& w, const WorldRange& r, int layer, const SceneTexture& tex, const float* scale, const float* uv_matrix,
+                                float strength) {
+  static const int order[3] = { 0, 2, 1 };
+  ScrollMesh& m = g_scroll_meshes[(uint64_t)r.start << 2 | (uint64_t)layer];
+  if (m.serial != r.uv_serial || m.texture != tex.hash || !m.mesh) {
+    SurfaceBuild s;
+    s.material = material_for(&tex, false, r.color, true, kLit, screen_strength(strength));
+    for (uint32_t i = r.start; i + 2 < r.start + r.count; i += 3)
+      for (int k : order) if (w.indices[i + k] < w.vertices.size()) add_index(s, w, w.indices[i + k], scale, uv_matrix, kGlowLift * (0.5f + 0.25f * layer));
+    remixapi_MeshHandle mesh = nullptr;
+    if (s.indices.size() >= 3) {
+      remixapi_MeshInfoSurfaceTriangles t = {};
+      t.vertices_values = s.vertices.data();
+      t.vertices_count = s.vertices.size();
+      t.indices_values = s.indices.data();
+      t.indices_count = s.indices.size() - s.indices.size() % 3;
+      t.material = s.material;
+      remixapi_MeshInfo info = {};
+      info.sType = REMIXAPI_STRUCT_TYPE_MESH_INFO;
+      uint64_t h = fnv1a64(&r.start, sizeof r.start, w.vb_hash);
+      h = fnv1a64(&r.uv_serial, sizeof r.uv_serial, h);
+      h = fnv1a64(&tex.hash, sizeof tex.hash, h);
+      info.hash = fnv1a64(&layer, sizeof layer, h) ^ 0x5343524f4c4c5f31ull;   // (a mesh is known by its hash: a new one each time)
+      info.surfaces_values = &t;
+      info.surfaces_count = 1;
+      if (g_api.CreateMesh(&info, &mesh) != REMIXAPI_ERROR_CODE_SUCCESS) mesh = nullptr;
+    }
+    if (m.mesh) g_api.DestroyMesh(m.mesh);
+    m.mesh = mesh;
+    m.serial = r.uv_serial;
+    m.texture = tex.hash;
+  }
+  if (!m.mesh) return;
+  remixapi_InstanceInfo inst = {};
+  inst.sType = REMIXAPI_STRUCT_TYPE_INSTANCE_INFO;
+  inst.mesh = m.mesh;
+  inst.transform.matrix[0][0] = inst.transform.matrix[1][1] = inst.transform.matrix[2][2] = 1.0f;
+  inst.doubleSided = 1;
+  g_api.DrawInstance(&inst);
 }
 
 static void submit_animated_polygons() {
@@ -631,6 +714,49 @@ static void submit_animated_polygons() {
     if (r.texture < 0 || (size_t)r.start + r.count > w.indices.size()) continue;
     const SceneTexture& tex = textures[r.texture];
     bool self_lit = r.unshaded;
+    if (r.scrolling && self_lit) {
+      // The floor itself: black, and there. Then the light on it.
+      auto base_key = std::make_pair(start ^ 0x20000000u, (uint64_t)0);
+      auto base = g_animated_meshes.find(base_key);
+      if (base == g_animated_meshes.end()) {
+        SurfaceBuild s;
+        s.material = material_for(&tex, false, r.color, false, kSurface, 1.0f, 0, true);
+        for (uint32_t i = r.start; i + 2 < r.start + r.count; i += 3)
+          for (int k : order) if (w.indices[i + k] < w.vertices.size()) add_index(s, w, w.indices[i + k]);
+        remixapi_MeshHandle mesh = nullptr;
+        if (s.indices.size() >= 3) {
+          remixapi_MeshInfoSurfaceTriangles t = {};
+          t.vertices_values = s.vertices.data();
+          t.vertices_count = s.vertices.size();
+          t.indices_values = s.indices.data();
+          t.indices_count = s.indices.size() - s.indices.size() % 3;
+          t.material = s.material;
+          remixapi_MeshInfo info = {};
+          info.sType = REMIXAPI_STRUCT_TYPE_MESH_INFO;
+          info.hash = fnv1a64(&start, sizeof start, w.vb_hash) ^ 0x5343524f4c4c4253ull;
+          info.surfaces_values = &t;
+          info.surfaces_count = 1;
+          if (g_api.CreateMesh(&info, &mesh) != REMIXAPI_ERROR_CODE_SUCCESS) mesh = nullptr;
+        }
+        base = g_animated_meshes.emplace(base_key, mesh).first;
+      }
+      if (base->second) {
+        remixapi_InstanceInfo inst = {};
+        inst.sType = REMIXAPI_STRUCT_TYPE_INSTANCE_INFO;
+        inst.mesh = base->second;
+        inst.transform.matrix[0][0] = inst.transform.matrix[1][1] = inst.transform.matrix[2][2] = 1.0f;
+        inst.doubleSided = 1;
+        g_api.DrawInstance(&inst);
+      }
+      float tint = std::clamp(std::max(r.color[0], std::max(r.color[1], r.color[2])), 0.0f, 1.0f);
+      bool second = r.add_texture >= 0 && (size_t)r.add_texture < textures.size() && r.seen_frame != ~0ull && r.add_frame != ~0ull && r.seen_frame <= r.add_frame + 1;
+      // The engine adds the two layers as displayed; added as light, two equal ones come
+      // to 1.4 times one on screen, not twice. Each is given the difference.
+      float both = second ? 2.3f : 1.0f;
+      if (tint > 0.02f) submit_scroll_layer(w, r, 0, tex, r.scale, r.uv_matrix, both * powf(tint, 2.2f));
+      if (second) submit_scroll_layer(w, r, 1, textures[(size_t)r.add_texture], r.add_scale, r.add_uv_matrix, both * powf(std::clamp(r.add_strength, 0.0f, 1.0f), 2.2f));
+      continue;
+    }
     auto key = std::make_pair(start, tex.hash);
     auto found = g_animated_meshes.find(key);
     if (found == g_animated_meshes.end()) {
@@ -782,13 +908,13 @@ static void submit_glow_polygons() {
     auto it = w.ranges.find(start);
     if (it == w.ranges.end()) continue;
     const WorldRange& r = it->second;
-    if (r.glow_texture < 0 || r.animated || (size_t)r.start + r.count > w.indices.size()) continue;
+    if (r.glow_texture < 0 || (r.animated && !r.scrolling) || (size_t)r.start + r.count > w.indices.size()) continue;
     // Drawn this frame without its glow pass: the engine has switched the glow off.
     if (r.seen_frame != ~0ull && r.glow_frame != ~0ull && r.seen_frame > r.glow_frame + 1) continue;
     uint32_t step = (uint32_t)(r.glow_strength * kGlowSteps + 0.5f);
     // The engine adds a glow layer scaled by its texture's alpha. One whose texture is
     // see-through nearly everywhere adds next to nothing there, whatever colour it holds.
-    if (r.glow_texture >= 0 && (size_t)r.glow_texture < textures.size() && textures[(size_t)r.glow_texture].has_mean && textures[(size_t)r.glow_texture].mean_alpha < 0.03f) step = 0;
+    if (r.glow_texture >= 0 && (size_t)r.glow_texture < textures.size() && textures[(size_t)r.glow_texture].faint(r.scrolling)) step = 0;
     if (step == 0) continue;
     const SceneTexture& tex = textures[r.glow_texture];
     auto key = std::make_pair(start ^ 0x80000000u, tex.hash * 31 + step);
@@ -864,6 +990,7 @@ static void build_level(double seconds) {
     // Full-bright polygons (screens, lit signs) glow. A blank first layer says nothing
     // about the surface, so there the second layer's own flag counts.
     bool self_lit = second_is_surface ? r.overlay_unshaded : r.unshaded;
+    bool engine_unlit = self_lit;   // the engine does not shade it, however dark its colour makes it
     // Only a reflection, with nothing or just lines over it: a dark mirror, not a lamp.
     bool mirror_base = r.env_mapped && !second_is_surface;
     if (mirror_base) self_lit = false;
@@ -877,6 +1004,7 @@ static void build_level(double seconds) {
     }
     bool skin = water && g_water_mode >= 2;
     if (skin) self_lit = false;
+    if (water || mirror_base) engine_unlit = false;
     // A full-bright surface is as bright as its material's colour says: the engine shows
     // texture times colour, and a dark colour is how it keeps a switched-off panel dim.
     float tint = r.color[0] > r.color[1] ? (r.color[0] > r.color[2] ? r.color[0] : r.color[2]) : (r.color[1] > r.color[2] ? r.color[1] : r.color[2]);
@@ -886,7 +1014,7 @@ static void build_level(double seconds) {
     float lit_level = self_lit ? powf((float)tint_step / 16.0f, 2.2f) : 1.0f;   // to linear light, like everything the engine multiplies on screen
     uint64_t key = ((uint64_t)(uint32_t)(second_is_surface ? r.overlay_texture : r.texture) << 5) | (r.alpha_test ? 1 : 0) | (second_is_surface ? 2 : 0) |
                    (self_lit ? 4 : 0) | (water ? 8 : 0) | (skin ? 16 : 0) | ((uint64_t)(self_lit ? tint_step : 0) << 40);
-    key |= (uint64_t)(r.env_layer ? 1 : 0) << 46;
+    key |= (uint64_t)(r.env_layer ? 1 : 0) << 46 | (uint64_t)(engine_unlit ? 1 : 0) << 47;
     if (skin) key = 0x57415445525f5348ull + (uint64_t)g_water_mode;   // one surface for all of it
     if (mirror_base && !skin) {
       uint32_t q = (uint32_t)(std::clamp(r.color[0], 0.0f, 1.0f) * 32.0f + 0.5f) << 16 | (uint32_t)(std::clamp(r.color[1], 0.0f, 1.0f) * 32.0f + 0.5f) << 8 |
@@ -897,7 +1025,7 @@ static void build_level(double seconds) {
     if (!s.material)
       s.material = skin ? water_material(g_water_mode == 3) : mirror_base ? mirror_material(r.color, 0.0f) :
                    material_for(main, r.alpha_test && !second_is_surface, r.color, self_lit, kSurface, screen_strength(g_emissive_light) * lit_level,
-                                water ? 2 : second_is_surface || r.env_layer ? 1 : 0);
+                                water ? 2 : second_is_surface || r.env_layer ? 1 : 0, engine_unlit);
     if (self_lit && main && g_emissive_light < 1.0f) {   // the rest of its brightness, for the eye only
       SurfaceBuild& lit = lit_layers[key];
       if (!lit.material) lit.material = material_for(main, false, r.color, true, kLit, screen_strength(1.0f - g_emissive_light) * lit_level);
@@ -915,7 +1043,7 @@ static void build_level(double seconds) {
     if (over) ++layered;
     if (over && !second_is_surface) {   // lettering and the like: a decal on top of the wall
       SurfaceBuild& o = overlays[(uint64_t)(uint32_t)r.overlay_texture];
-      if (!o.material) o.material = material_for(over, false, r.color, r.overlay_unshaded, kDecal);
+      if (!o.material) o.material = material_for(over, false, r.color, r.overlay_unshaded, sparse ? kLines : kDecal);
       for (uint32_t i = r.start; i + 2 < r.start + r.count; i += 3)
         for (int k : order) if (w.indices[i + k] < w.vertices.size()) add_index(o, w, w.indices[i + k], r.overlay_scale, r.overlay_uv_matrix);
     }
@@ -929,6 +1057,7 @@ static void build_level(double seconds) {
     // (An opening between two cells is no wall: until the engine draws it, as it does
     // water, nothing stands there.)
     if (scene_opening_at((uint32_t)i)) continue;
+    if (g_skip_unseen) continue;
     for (int k : order) if (w.indices[i + k] < w.vertices.size()) add_index(unknown, w, w.indices[i + k]);
   }
 
@@ -1504,7 +1633,8 @@ static bool fit_to_baked(const LevelBvh& bvh, const std::vector<SceneLight>& lig
         } else {
           // By point: every point's own ratio, weighted by what the lamp sends it. The
           // points nearest a lamp weigh most, so far walls err on the dark side.
-          float ratio = have > 1e-6f ? target / have : 1.0f;
+          float seen = kFitRule == 2 ? shown : have;   // 2: light beyond white is not held against a lamp
+          float ratio = seen > 1e-6f ? target / seen : 1.0f;
           if (point.white[c] && ratio < 1.0f) ratio = kWhiteHeadroom > 0.0f && have > kWhiteHeadroom * point.cap ? kWhiteHeadroom * point.cap / have : 1.0f;
           ratio = ratio < 0.2f ? 0.2f : ratio > 5.0f ? 5.0f : ratio;
           double weight = (double)point.area * e.sends * shade[e.light][c];
