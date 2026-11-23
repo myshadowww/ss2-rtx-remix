@@ -93,6 +93,8 @@ static bool g_glass = false;
 static bool g_sky = true;             // the engine's sky box is sent to Remix
 static bool g_stand_off = true;       // lights close to a wall are moved out from it; see place_lights()
 static bool g_fit_lights = true;      // each light's strength is fitted to the room it lights; see place_lights()
+static bool g_linear_light_colour = true;   // light colours are taken from display space to linear light; see make_light()
+static bool g_fit_baked = true;       // ...against the engine's own lightmaps where the mission file gives them; see fit_to_baked()
 static int g_water_mode = 1;          // water surfaces: 0 as the engine textures them, 1 the same but mirror-smooth, 2 a see-through skin
 static bool g_sprites = true;         // the engine's world-space quads (particles, sparks) go into the path-traced scene
 static size_t g_stat_translucent;
@@ -231,6 +233,8 @@ static bool start() {
   g_sky = config_flag(L"Sky", true);
   g_stand_off = config_flag(L"StandOff", true);
   g_fit_lights = config_flag(L"FitLights", true);
+  g_fit_baked = config_flag(L"FitLightmaps", true);
+  g_linear_light_colour = config_flag(L"LinearLightColour", true);
   g_sprites = config_flag(L"Sprites", true);
   g_water_mode = (int)config_number(L"Water", g_water_mode);
   g_see_through = config_flag(L"SeeThrough", true);
@@ -980,6 +984,7 @@ static std::vector<remixapi_LightHandle> g_moving_handles;
 static std::vector<remixapi_Float3D> g_light_shown;
 static std::vector<float> g_light_gain;      // strength relative to the plain five-unit match
 static const float kFitShare = 0.6f;
+static const float kDarkSide = 0.9f;   // the lightmap fit aims a little under the engine: darker is the better side to miss on
 static void lights_restated();
 
 static void closest_on_triangle(const float* p, const float* a, const float* b, const float* c, float* out) {
@@ -1010,31 +1015,310 @@ static void closest_on_triangle(const float* p, const float* a, const float* b, 
 
 struct LevelTri { float a[3], b[3], c[3], n[3], mid[3], radius; };
 
-// Distance to the nearest level triangle along a ray, or a negative number.
-static float cast_ray(const std::vector<LevelTri>& list, const float* p, const float* dir, float limit) {
-  float nearest = limit;
-  for (const LevelTri& tri : list) {
-    float m[3] = { tri.mid[0] - p[0], tri.mid[1] - p[1], tri.mid[2] - p[2] };
-    float along = m[0] * dir[0] + m[1] * dir[1] + m[2] * dir[2];
-    if (along < -tri.radius || along - tri.radius > nearest) continue;
-    float off2 = m[0] * m[0] + m[1] * m[1] + m[2] * m[2] - along * along;
-    if (off2 > tri.radius * tri.radius) continue;
-    float e1[3], e2[3], h[3], sv[3], qv[3];
-    for (int k = 0; k < 3; ++k) { e1[k] = tri.b[k] - tri.a[k]; e2[k] = tri.c[k] - tri.a[k]; }
-    h[0] = dir[1] * e2[2] - dir[2] * e2[1]; h[1] = dir[2] * e2[0] - dir[0] * e2[2]; h[2] = dir[0] * e2[1] - dir[1] * e2[0];
-    float det = e1[0] * h[0] + e1[1] * h[1] + e1[2] * h[2];
-    if (fabsf(det) < 1e-7f) continue;
-    float inv = 1.0f / det;
-    for (int k = 0; k < 3; ++k) sv[k] = p[k] - tri.a[k];
-    float u = inv * (sv[0] * h[0] + sv[1] * h[1] + sv[2] * h[2]);
-    if (u < 0.0f || u > 1.0f) continue;
-    qv[0] = sv[1] * e1[2] - sv[2] * e1[1]; qv[1] = sv[2] * e1[0] - sv[0] * e1[2]; qv[2] = sv[0] * e1[1] - sv[1] * e1[0];
-    float v = inv * (dir[0] * qv[0] + dir[1] * qv[1] + dir[2] * qv[2]);
-    if (v < 0.0f || u + v > 1.0f) continue;
-    float t = inv * (e2[0] * qv[0] + e2[1] * qv[1] + e2[2] * qv[2]);
-    if (t > 0.001f && t < nearest) nearest = t;
+// The level's triangles in a tree of boxes, for the many rays the light fitting casts.
+struct LevelBvh {
+  struct Node { float lo[3], hi[3]; int left, right, first, count; };
+  std::vector<LevelTri> tris;
+  std::vector<Node> nodes;
+
+  int build_node(int first, int count) {
+    Node node;
+    for (int k = 0; k < 3; ++k) { node.lo[k] = 1e30f; node.hi[k] = -1e30f; }
+    float clo[3] = { 1e30f, 1e30f, 1e30f }, chi[3] = { -1e30f, -1e30f, -1e30f };
+    for (int i = first; i < first + count; ++i) {
+      const LevelTri& t = tris[(size_t)i];
+      for (const float* corner : { t.a, t.b, t.c })
+        for (int k = 0; k < 3; ++k) { if (corner[k] < node.lo[k]) node.lo[k] = corner[k]; if (corner[k] > node.hi[k]) node.hi[k] = corner[k]; }
+      for (int k = 0; k < 3; ++k) { if (t.mid[k] < clo[k]) clo[k] = t.mid[k]; if (t.mid[k] > chi[k]) chi[k] = t.mid[k]; }
+    }
+    node.left = node.right = -1;
+    node.first = first;
+    node.count = count;
+    int index = (int)nodes.size();
+    nodes.push_back(node);
+    if (count > 8) {
+      int axis = 0;
+      for (int k = 1; k < 3; ++k) if (chi[k] - clo[k] > chi[axis] - clo[axis]) axis = k;
+      int middle = first + count / 2;
+      std::nth_element(tris.begin() + first, tris.begin() + middle, tris.begin() + first + count,
+                       [axis](const LevelTri& x, const LevelTri& y) { return x.mid[axis] < y.mid[axis]; });
+      int left = build_node(first, middle - first);
+      int right = build_node(middle, first + count - middle);
+      nodes[(size_t)index].left = left;
+      nodes[(size_t)index].right = right;
+      nodes[(size_t)index].count = 0;
+    }
+    return index;
   }
-  return nearest < limit ? nearest : -1.0f;
+  void build() {
+    nodes.clear();
+    nodes.reserve(tris.size() / 2 + 16);
+    if (!tris.empty()) build_node(0, (int)tris.size());
+  }
+  // Distance to the nearest triangle along a ray, or a negative number if none within `limit`.
+  float cast(const float* p, const float* dir, float limit) const {
+    if (nodes.empty()) return -1.0f;
+    float inv[3];
+    for (int k = 0; k < 3; ++k) inv[k] = fabsf(dir[k]) > 1e-9f ? 1.0f / dir[k] : (dir[k] < 0.0f ? -1e9f : 1e9f);
+    float nearest = limit;
+    int stack[64], top = 0;
+    stack[top++] = 0;
+    while (top) {
+      const Node& node = nodes[(size_t)stack[--top]];
+      float t0 = 0.0f, t1 = nearest;
+      for (int k = 0; k < 3 && t0 <= t1; ++k) {
+        float x = (node.lo[k] - p[k]) * inv[k], y = (node.hi[k] - p[k]) * inv[k];
+        if (x > y) { float swap = x; x = y; y = swap; }
+        if (x > t0) t0 = x;
+        if (y < t1) t1 = y;
+      }
+      if (t0 > t1) continue;
+      if (node.left >= 0) {
+        if (top < 62) { stack[top++] = node.left; stack[top++] = node.right; }
+        continue;
+      }
+      for (int i = node.first; i < node.first + node.count; ++i) {
+        const LevelTri& tri = tris[(size_t)i];
+        float e1[3], e2[3], h[3], sv[3], qv[3];
+        for (int k = 0; k < 3; ++k) { e1[k] = tri.b[k] - tri.a[k]; e2[k] = tri.c[k] - tri.a[k]; }
+        h[0] = dir[1] * e2[2] - dir[2] * e2[1]; h[1] = dir[2] * e2[0] - dir[0] * e2[2]; h[2] = dir[0] * e2[1] - dir[1] * e2[0];
+        float det = e1[0] * h[0] + e1[1] * h[1] + e1[2] * h[2];
+        if (fabsf(det) < 1e-7f) continue;
+        float idet = 1.0f / det;
+        for (int k = 0; k < 3; ++k) sv[k] = p[k] - tri.a[k];
+        float u = idet * (sv[0] * h[0] + sv[1] * h[1] + sv[2] * h[2]);
+        if (u < 0.0f || u > 1.0f) continue;
+        qv[0] = sv[1] * e1[2] - sv[2] * e1[1]; qv[1] = sv[2] * e1[0] - sv[0] * e1[2]; qv[2] = sv[0] * e1[1] - sv[1] * e1[0];
+        float v = idet * (dir[0] * qv[0] + dir[1] * qv[1] + dir[2] * qv[2]);
+        if (v < 0.0f || u + v > 1.0f) continue;
+        float t = idet * (e2[0] * qv[0] + e2[1] * qv[1] + e2[2] * qv[2]);
+        if (t > 0.001f && t < nearest) nearest = t;
+      }
+    }
+    return nearest < limit ? nearest : -1.0f;
+  }
+};
+
+// The second, better fit, when the mission file's lightmaps are to hand: what the engine
+// actually baked on every polygon. A light's strength is set so that the light it sends
+// to the polygons it reaches (straight, unshadowed, by the square of the distance) adds
+// up, over their area, to the share of the baked light that is this light's. Which share
+// that is comes out of the fit itself: every polygon's baked value is divided among the
+// lights that reach it in proportion to what each would send, and the strengths are
+// corrected, round and round, until they stop moving. A light that changes has a layer of
+// its own in the lightmaps, so its share needs no dividing. `kFitShare` as before leaves
+// room for bounced light. A polygon baked to full white only says "at least this much".
+static bool fit_to_baked(const LevelBvh& bvh, const std::vector<SceneLight>& lights, const World& w, float reach) {
+  const BakedLight& baked = scene_baked_light();
+  size_t count = baked.steady.size();
+  if (!count) return false;
+  // A polygon is sampled at the middle of each of its triangles: one point at its centre
+  // overstates what a light close to it delivers to the whole of it.
+  struct Sample { float at[3]; float area; };
+  struct Poly { double c[3] = { 0, 0, 0 }; float n[3] = { 0, 0, 0 }; double area = 0.0; std::vector<Sample> samples; };
+  std::vector<Poly> polys(count);
+  for (size_t t = 0; t + 2 < w.indices.size(); t += 3) {
+    uint32_t ia = w.indices[t], ib = w.indices[t + 1], ic = w.indices[t + 2];
+    if (ia >= w.vertices.size() || ib >= w.vertices.size() || ic >= w.vertices.size()) continue;
+    const WorldVertex &va = w.vertices[ia], &vb = w.vertices[ib], &vc = w.vertices[ic];
+    uint32_t poly = va.flags & 0x7FFFF;
+    if (poly >= count || fabsf(va.position[0]) >= 1199.0f) continue;
+    double e1[3], e2[3];
+    for (int k = 0; k < 3; ++k) { e1[k] = vb.position[k] - va.position[k]; e2[k] = vc.position[k] - va.position[k]; }
+    double cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2], cz = e1[0] * e2[1] - e1[1] * e2[0];
+    double area = 0.5 * sqrt(cx * cx + cy * cy + cz * cz);
+    Poly& q = polys[poly];
+    for (int k = 0; k < 3; ++k) q.c[k] += area * (va.position[k] + vb.position[k] + vc.position[k]) / 3.0;
+    memcpy(q.n, va.normal, 12);
+    q.area += area;
+    if (area > 0.0 && q.samples.size() < 12) {
+      Sample sample;
+      for (int k = 0; k < 3; ++k) sample.at[k] = (va.position[k] + vb.position[k] + vc.position[k]) / 3.0f;
+      sample.area = (float)area;
+      q.samples.push_back(sample);
+    }
+  }
+  for (Poly& q : polys) if (q.area > 0.0) for (int k = 0; k < 3; ++k) q.c[k] /= q.area;
+
+  // How much of the light that falls on a polygon's surroundings comes back off them: the
+  // textures' average colour, in linear light, over the polygons of the same 12-unit block
+  // and its neighbours. Light bounces in a path tracer and did not in the engine, so where
+  // walls are pale the lights themselves must supply a smaller part of what was baked.
+  const auto& textures = scene_textures();
+  std::vector<float> reflect(count, -1.0f);
+  for (const auto& kv : w.ranges) {
+    const WorldRange& r = kv.second;
+    if (r.start >= w.indices.size() || r.texture < 0 || (size_t)r.texture >= textures.size()) continue;
+    uint32_t vi = w.indices[r.start];
+    if (vi >= w.vertices.size()) continue;
+    uint32_t poly = w.vertices[vi].flags & 0x7FFFF;
+    const SceneTexture& tex = textures[(size_t)r.texture];
+    if (poly >= count || tex.uniform) continue;
+    const float* rgb = tex.solid ? tex.solid_rgba : tex.has_mean ? tex.mean_rgb : nullptr;
+    if (!rgb) continue;
+    reflect[poly] = (powf(rgb[0], 2.2f) + powf(rgb[1], 2.2f) + powf(rgb[2], 2.2f)) / 3.0f;
+  }
+  struct Block { double weighted = 0.0, area = 0.0; };
+  std::map<int64_t, Block> blocks;
+  auto block_of = [](const double* c, int dx, int dy, int dz) {
+    int64_t x = (int64_t)floor(c[0] / 12.0) + dx, y = (int64_t)floor(c[1] / 12.0) + dy, z = (int64_t)floor(c[2] / 12.0) + dz;
+    return (x & 0x1FFFFF) << 42 | (y & 0x1FFFFF) << 21 | (z & 0x1FFFFF);
+  };
+  double level_weighted = 0.0, level_area = 0.0;
+  for (size_t j = 0; j < count; ++j) {
+    if (!(polys[j].area > 0.0) || reflect[j] < 0.0f) continue;
+    Block& b = blocks[block_of(polys[j].c, 0, 0, 0)];
+    b.weighted += polys[j].area * reflect[j];
+    b.area += polys[j].area;
+    level_weighted += polys[j].area * reflect[j];
+    level_area += polys[j].area;
+  }
+  float level_reflect = level_area > 0.0 ? (float)(level_weighted / level_area) : 0.35f;
+  std::vector<float> share(count, 1.0f);
+  double share_sum = 0.0, share_area = 0.0;
+  for (size_t j = 0; j < count; ++j) {
+    if (!(polys[j].area > 0.0)) continue;
+    double weighted = 0.0, area = 0.0;
+    for (int dx = -1; dx <= 1; ++dx)
+      for (int dy = -1; dy <= 1; ++dy)
+        for (int dz = -1; dz <= 1; ++dz) {
+          auto found = blocks.find(block_of(polys[j].c, dx, dy, dz));
+          if (found != blocks.end()) { weighted += found->second.weighted; area += found->second.area; }
+        }
+    float around = area > 50.0 ? (float)(weighted / area) : level_reflect;
+    around = around < 0.05f ? 0.05f : around > 0.75f ? 0.75f : around;
+    share[j] = kDarkSide * (1.0f - around);
+    share_sum += polys[j].area * share[j];
+    share_area += polys[j].area;
+  }
+  // What the lights must send a polygon: the baked value is a multiplier on the texture as
+  // displayed, so in linear light it is that value to the power 2.2.
+  auto wanted = [&](size_t j, float baked_value) { return share[j] * powf(baked_value < 0.0f ? 0.0f : baked_value, 2.2f); };
+
+  // One number for a light's colour, as for a lightmap value: the mean of its channels.
+  std::vector<float> x(lights.size(), 0.0f);
+  std::vector<uint8_t> changing(lights.size(), 0);
+  for (const BakedLayer& layer : baked.layers) if (layer.light >= 0 && (size_t)layer.light < lights.size()) changing[(size_t)layer.light] = 1;
+  for (size_t i = 0; i < lights.size(); ++i) {
+    const SceneLight& l = lights[i];
+    float steady = (l.color[0] + l.color[1] + l.color[2]) / 3.0f, full = (l.feed_full[0] + l.feed_full[1] + l.feed_full[2]) / 3.0f;
+    x[i] = changing[i] && full > 0.0f ? full : steady;
+  }
+  // What light i, at strength 1, sends straight to polygon j (no shadow test here).
+  auto sends_at = [&](size_t i, const float* point, const float* normal) -> float {
+    const remixapi_Float3D& at = g_light_shown[i];
+    float to[3] = { at.x - point[0], at.y - point[1], at.z - point[2] };
+    float d2 = to[0] * to[0] + to[1] * to[1] + to[2] * to[2];
+    if (d2 < 0.01f) d2 = 0.01f;
+    float d = sqrtf(d2);
+    float cosine = (to[0] * normal[0] + to[1] * normal[1] + to[2] * normal[2]) / d;
+    if (cosine <= 0.0f) return 0.0f;
+    float shape = 1.0f;
+    const SceneLight& l = lights[i];
+    float axis = sqrtf(l.direction[0] * l.direction[0] + l.direction[1] * l.direction[1] + l.direction[2] * l.direction[2]);
+    if (l.spot && axis > 0.5f && l.outer > -1.0f && l.outer < 1.0f) {
+      float c = -(to[0] * l.direction[0] + to[1] * l.direction[1] + to[2] * l.direction[2]) / (d * axis);
+      if (c <= l.outer) return 0.0f;
+      shape = l.inner > l.outer ? (c - l.outer) / (l.inner - l.outer) : 1.0f;
+      if (shape > 1.0f) shape = 1.0f;
+      shape = shape * shape * (3.0f - 2.0f * shape);   // the smooth step Remix applies
+    }
+    return x[i] * reach * cosine * shape / d2;
+  };
+  auto sends = [&](size_t i, const Poly& q, float* out_dir, float* out_dist) -> float {
+    double total = 0.0, area = 0.0;
+    for (const Sample& sample : q.samples) { total += (double)sample.area * sends_at(i, sample.at, q.n); area += sample.area; }
+    const remixapi_Float3D& at = g_light_shown[i];
+    float to[3] = { at.x - (float)q.c[0], at.y - (float)q.c[1], at.z - (float)q.c[2] };
+    float d = sqrtf(to[0] * to[0] + to[1] * to[1] + to[2] * to[2]);
+    if (out_dir) for (int k = 0; k < 3; ++k) out_dir[k] = d > 1e-4f ? to[k] / d : 0.0f;
+    if (out_dist) *out_dist = d;
+    return area > 0.0 ? (float)(total / area) : 0.0f;
+  };
+
+  // Lights that change: each against its own layers.
+  std::vector<double> num(lights.size(), 0.0), den(lights.size(), 0.0);
+  for (const BakedLayer& layer : baked.layers) {
+    if (layer.light < 0 || (size_t)layer.light >= lights.size() || layer.polygon >= count) continue;
+    const Poly& q = polys[layer.polygon];
+    if (!(q.area > 0.0)) continue;
+    num[(size_t)layer.light] += q.area * wanted(layer.polygon, layer.mean);
+    den[(size_t)layer.light] += q.area * sends((size_t)layer.light, q, nullptr, nullptr);
+  }
+  unsigned fitted_changing = 0, fitted_steady = 0;
+  for (size_t i = 0; i < lights.size(); ++i) {
+    if (!changing[i] || !(den[i] > 0.0) || !(num[i] > 0.0)) continue;
+    float gain = (float)(num[i] / den[i]);
+    g_light_gain[i] = gain < 0.1f ? 0.1f : gain > 80.0f ? 80.0f : gain;
+    ++fitted_changing;
+  }
+
+  // Lights that never change: all against the steady layer.
+  struct Entry { uint32_t polygon, light; float sends; };
+  std::vector<Entry> entries;
+  size_t rays = 0;
+  for (size_t j = 0; j < count; ++j) {
+    const Poly& q = polys[j];
+    if (!(q.area > 0.0) || baked.steady[j] < 0.0f) continue;
+    float origin[3] = { (float)q.c[0] + q.n[0] * 0.05f, (float)q.c[1] + q.n[1] * 0.05f, (float)q.c[2] + q.n[2] * 0.05f };
+    for (size_t i = 0; i < lights.size(); ++i) {
+      if (changing[i] || !(x[i] > 0.0f)) continue;
+      float dir[3], dist = 0.0f;
+      float a = sends(i, q, dir, &dist);
+      if (a < 0.003f) continue;
+      ++rays;
+      if (bvh.cast(origin, dir, dist - 0.1f) > 0.0f) continue;   // in its shadow
+      entries.push_back({ (uint32_t)j, (uint32_t)i, a });
+    }
+  }
+  std::vector<float> gain(lights.size(), 1.0f), predicted(count, 0.0f);
+  for (size_t i = 0; i < lights.size(); ++i) gain[i] = g_light_gain[i];
+  double baked_total = 0.0, before = 0.0, after = 0.0;
+  for (int round = 0; round <= 40; ++round) {
+    std::fill(predicted.begin(), predicted.end(), 0.0f);
+    for (const Entry& e : entries) predicted[e.polygon] += gain[e.light] * e.sends;
+    if (round == 0 || round == 40) {
+      double total = 0.0;
+      baked_total = 0.0;
+      for (size_t j = 0; j < count; ++j)
+        if (polys[j].area > 0.0 && baked.steady[j] >= 0.0f) { total += polys[j].area * predicted[j]; baked_total += polys[j].area * wanted(j, baked.steady[j]); }
+      (round == 0 ? before : after) = total;
+      if (round == 40) break;
+    }
+    std::fill(num.begin(), num.end(), 0.0);
+    std::fill(den.begin(), den.end(), 0.0);
+    for (const Entry& e : entries) {
+      float target = wanted(e.polygon, baked.steady[e.polygon]), have = predicted[e.polygon];
+      float ratio = have > 1e-6f ? target / have : 1.0f;
+      if (baked.steady[e.polygon] >= 0.97f && ratio < 1.0f) ratio = 1.0f;   // full white: at least this much
+      double weight = polys[e.polygon].area * e.sends;
+      num[e.light] += weight * ratio;
+      den[e.light] += weight;
+    }
+    for (size_t i = 0; i < lights.size(); ++i) {
+      if (changing[i] || !(den[i] > 0.0)) continue;
+      float g = gain[i] * (float)(num[i] / den[i]);
+      gain[i] = g < 0.05f ? 0.05f : g > 80.0f ? 80.0f : g;
+    }
+  }
+  std::vector<float> all;
+  for (size_t i = 0; i < lights.size(); ++i) {
+    if (changing[i]) { if (den[i] > 0.0 || g_light_gain[i] != 1.0f) all.push_back(g_light_gain[i]); continue; }
+    bool reached = false;
+    for (const Entry& e : entries) if (e.light == i) { reached = true; break; }
+    if (!reached) continue;
+    g_light_gain[i] = gain[i];
+    all.push_back(gain[i]);
+    ++fitted_steady;
+  }
+  std::sort(all.begin(), all.end());
+  logf("remix: lights fitted to the engine's lightmaps: %u steady and %u changing ones (strength against the five-unit match: median %.2f, least %.2f, most %.1f); "
+       "%zu polygon-light pairs from %zu rays; light sent to the level was %.0f%% of the baked target before, %.0f%% after; "
+       "walls give back %.0f%% on average (known for %.0f%% of the area), so the lights supply %.0f%% of what was baked",
+       fitted_steady, fitted_changing, all.empty() ? 1.0f : all[all.size() / 2], all.empty() ? 1.0f : all.front(), all.empty() ? 1.0f : all.back(),
+       entries.size(), rays, baked_total > 0.0 ? 100.0 * before / baked_total : 0.0, baked_total > 0.0 ? 100.0 * after / baked_total : 0.0,
+       100.0 * level_reflect, share_area > 0.0 ? 100.0 * level_area / share_area : 0.0, share_area > 0.0 ? 100.0 * share_sum / share_area : 0.0);
+  return true;
 }
 
 static void place_lights() {
@@ -1047,7 +1331,9 @@ static void place_lights() {
   double t0 = now_ms();
   const float reach = g_light_scale / 8.0f;   // the plain match: five units at the default scale
   size_t tris = w.indices.size() / 3;
-  std::vector<LevelTri> list;
+  static LevelBvh bvh;
+  std::vector<LevelTri>& list = bvh.tris;
+  list.clear();
   list.reserve(tris);
   for (size_t t = 0; t < tris; ++t) {
     uint32_t ia = w.indices[t * 3], ib = w.indices[t * 3 + 1], ic = w.indices[t * 3 + 2];
@@ -1068,6 +1354,7 @@ static void place_lights() {
     tri.radius = sqrtf(r2);
     list.push_back(tri);
   }
+  bvh.build();
   // Directions spread evenly over the sphere.
   static float dirs[96][3];
   static bool have_dirs = false;
@@ -1100,9 +1387,10 @@ static void place_lights() {
           if (c <= l.outer) continue;
           share = l.inner > l.outer ? (c - l.outer) / (l.inner - l.outer) : 1.0f;
           if (share > 1.0f) share = 1.0f;
+          share = share * share * (3.0f - 2.0f * share);
         }
         weight += share;
-        float hit = cast_ray(list, p, dirs[d], 600.0f);
+        float hit = bvh.cast(p, dirs[d], 600.0f);
         if (hit <= 0.0f) continue;                    // out through a gap: lights nothing
         float engine = x / hit;
         if (l.radius > 0.0f) engine *= hit < l.radius ? 1.0f - hit / l.radius : 0.0f;   // the engine's cut-off distance
@@ -1139,13 +1427,15 @@ static void place_lights() {
     if (move > 2.0f) move = 2.0f;
     if (move < 0.05f) continue;
     float dir[3] = { (p[0] - at[0]) / best, (p[1] - at[1]) / best, (p[2] - at[2]) / best };
-    float beyond = cast_ray(list, p, dir, 600.0f);
+    float beyond = bvh.cast(p, dir, 600.0f);
     if (beyond > 0.0f && move > beyond * 0.5f) move = beyond * 0.5f;
     if (move < 0.05f) continue;
     g_light_shown[i] = { p[0] + dir[0] * move, p[1] + dir[1] * move, p[2] + dir[2] * move };
     ++moved;
     if (move > furthest) furthest = move;
   }
+  double t1 = now_ms();
+  bool by_lightmaps = g_fit_lights && g_fit_baked && fit_to_baked(bvh, lights, w, reach);
   float median = 1.0f, most = 1.0f;
   if (!gains.empty()) {
     std::sort(gains.begin(), gains.end());
@@ -1153,7 +1443,8 @@ static void place_lights() {
     most = gains.back();
   }
   logf("remix: %u of %zu lights fitted to their rooms (strength against the five-unit match: median %.2f, least %.2f, most %.1f); %u stood off from a wall (%.1f units at most); %.0f ms",
-       fitted, lights.size(), median, gains.empty() ? 1.0f : gains.front(), most, moved, furthest, now_ms() - t0);
+       fitted, lights.size(), median, gains.empty() ? 1.0f : gains.front(), most, moved, furthest, t1 - t0);
+  if (by_lightmaps) logf("remix: the lightmap fit took %.0f ms", now_ms() - t1);
 }
 
 static remixapi_LightHandle make_light(const SceneLight& l, const remixapi_Float3D& at, const float* color, uint64_t hash, float gain = 1.0f) {
@@ -1166,17 +1457,31 @@ static remixapi_LightHandle make_light(const SceneLight& l, const remixapi_Float
   if (l.spot && len > 0.5f && l.outer > -1.0f && l.outer < 1.0f) {
     sphere.shaping_hasvalue = 1;
     sphere.shaping_value.direction = { l.direction[0] / len, l.direction[1] / len, l.direction[2] / len };
+    // Remix: nothing outside the cone angle, then a smooth step up over `coneSoftness`,
+    // which is a span of the cosine, not of the angle: full strength from the engine's
+    // inner cone inwards.
     float outer_deg = acosf(l.outer) * 57.29578f;
-    float inner_deg = acosf(l.inner > l.outer && l.inner <= 1.0f ? l.inner : l.outer) * 57.29578f;
+    float inner_cos = l.inner > l.outer && l.inner <= 1.0f ? l.inner : l.outer;
     sphere.shaping_value.coneAngleDegrees = outer_deg;
-    sphere.shaping_value.coneSoftness = outer_deg > 0.01f ? (outer_deg - inner_deg) / outer_deg : 0.0f;
+    sphere.shaping_value.coneSoftness = inner_cos - l.outer > 0.001f ? inner_cos - l.outer : 0.001f;
     sphere.shaping_value.focusExponent = 0.0f;
   }
   remixapi_LightInfo li = {};
   li.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO;
   li.pNext = &sphere;
   li.hash = hash;
-  li.radiance = { color[0] * g_light_scale * gain, color[1] * g_light_scale * gain, color[2] * g_light_scale * gain };
+  // The engine multiplies a texture, as displayed, by the light's colour; Remix multiplies
+  // in linear light and the display curve comes after, which would leave a light twice as
+  // blue as red only a third bluer on screen. So the colour is taken to linear light
+  // (each channel to the power 2.2), at the same overall strength.
+  float shade[3] = { color[0], color[1], color[2] };
+  if (g_linear_light_colour) {
+    float mean = (color[0] + color[1] + color[2]) / 3.0f;
+    float lin[3] = { powf(color[0] < 0.0f ? 0.0f : color[0], 2.2f), powf(color[1] < 0.0f ? 0.0f : color[1], 2.2f), powf(color[2] < 0.0f ? 0.0f : color[2], 2.2f) };
+    float lin_mean = (lin[0] + lin[1] + lin[2]) / 3.0f;
+    if (lin_mean > 0.0f) for (int k = 0; k < 3; ++k) shade[k] = lin[k] * mean / lin_mean;
+  }
+  li.radiance = { shade[0] * g_light_scale * gain, shade[1] * g_light_scale * gain, shade[2] * g_light_scale * gain };
   remixapi_LightHandle h = nullptr;
   if (g_api.CreateLight(&li, &h) != REMIXAPI_ERROR_CODE_SUCCESS) h = nullptr;
   return h;

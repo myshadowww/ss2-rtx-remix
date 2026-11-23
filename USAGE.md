@@ -85,7 +85,9 @@ variables override it):
 | `EmissiveLight` | 0.15 | how much of a lamp face's or screen's brightness it also casts as light; the engine's cast none, 1 lets them light their rooms fully |
 | `AmbientScale` | 0 | how much of the engine's ambient light ordinary surfaces give off; off by default because that light bounces and floods closed pale rooms |
 | `LiveLights` | 1 | flashing, flickering and switched lights follow the engine's own value each frame (or replay their rhythm from the mission file where that is not to be had); 0: every light steady at its table value |
-| `FitLights` | 1 | fit each light's strength to the room it lights, where a plain match at five units leaves corridors too bright and big rooms too dark; costs about half a second when a level loads |
+| `FitLights` | 1 | fit each light's strength to the level, where a plain match at five units leaves corridors too bright and big rooms too dark |
+| `FitLightmaps` | 1 | do that fit against the engine's own baked lightmaps from the mission file (0: against an assumed falloff rule only) |
+| `LinearLightColour` | 1 | convert light colours to linear light so coloured lights tint as strongly as the engine's |
 | `StandOff` | 1 | move lights that sit close to a wall a little way out from it, so the wall gets a soft glow as in the engine, not a small bright disc |
 | `Sprites` | 1 | put the engine's particles, sparks and coronas into the path-traced scene (they are drawn before the point where the path-traced image replaces the engine's, so otherwise they are lost) |
 | `Water` | 1 | water surfaces, which the mission file marks: 0 as the engine textures them, 1 the same but mirror-smooth so they reflect, 2 a see-through tinted skin |
@@ -193,10 +195,11 @@ anything heavy on the disk at the same time: the menu keys are timed.
   lights take their brightness from the engine"). A light that reaches no level surface
   replays its rhythm from the file instead.
 - Lights fall off with the square of the distance (the engine's: with the distance). Each
-  light's strength is fitted to its room, and lights close to a wall are moved a little
-  way out from it (two units at most) so the wall gets a glow, not a small bright disc.
-  Measured against the engine in the same views: corridors within about 15%, on the dark
-  side; large rooms (the station's hangar) only 60 to 75% as bright; and the engine's
-  coloured lights tint walls more strongly. F11, exposure, changes the overall level.
+  light's strength is fitted to what the engine baked into its lightmaps, less what
+  bounced light will add, and lights close to a wall are moved a little way out from it
+  (two units at most) so the wall gets a glow, not a small bright disc. Measured against
+  the engine in the same views: the station's hangar and Hydroponics within about 10%,
+  the MedSci corridor between 30% darker and 30% brighter depending on the view. Colours
+  are close; the engine's are a little stronger. F11, exposure, changes the overall level.
 - Every mission loads and renders (`tools/sweep.py`), but each was only looked at from
   its start position.

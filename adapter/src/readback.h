@@ -25,6 +25,10 @@ struct TextureDump {
   // An empty layer: nearly every block (or texel) of the top mip is the same transparent
   // one. The engine uses such textures as the first pass of layered surfaces.
   bool uniform = false;
+  // A rough average colour (as stored, 0 to 1), from a small mip: block endpoints for the
+  // compressed formats. `has_mean` is false for formats this does not read.
+  bool has_mean = false;
+  float mean_rgb[3] = { 0.5f, 0.5f, 0.5f };
 };
 
 // Writes all mips of a 2D texture as a DDS file (DX10 header) under `dir`, named by

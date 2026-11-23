@@ -49,6 +49,7 @@ static std::vector<float> g_anim_values;
 static int g_anim_slot = -1;
 static size_t g_anim_entries;     // how many entries the level's polygons use
 static std::vector<unsigned char> g_water;   // per polygon number, from the mission file; empty when unknown
+static BakedLight g_baked;
 static bool g_mission_geometry_tried;   // the by-geometry lookup has run for this level
 static unsigned g_lights_generation;
 static unsigned g_mission_attempts;
@@ -106,6 +107,26 @@ static void fail_once(const char* what) {
 }
 
 static std::map<uint64_t, int> g_cached_texture_index;   // textures named in the level memory: hash -> record
+// Textures' rough average colours from earlier sessions (texture_means.txt beside the
+// texture cache), so that a texture only remembered, not yet drawn, has one too.
+struct RememberedMean { float rgb[3]; };
+static std::map<uint64_t, RememberedMean> g_remembered_means;
+static bool g_means_loaded;
+
+static std::wstring means_file() { return g_texture_dir + L"..\\texture_means.txt"; }
+static void load_remembered_means() {
+  if (g_means_loaded) return;
+  g_means_loaded = true;
+  FILE* f = _wfopen(means_file().c_str(), L"r");
+  if (!f) return;
+  char line[128];
+  while (fgets(line, sizeof line, f)) {
+    unsigned long long hash = 0;
+    RememberedMean m;
+    if (sscanf(line, "%llx %f %f %f", &hash, &m.rgb[0], &m.rgb[1], &m.rgb[2]) == 4) g_remembered_means[hash] = m;
+  }
+  fclose(f);
+}
 static std::set<uint64_t> g_uniform_hashes;              // textures known to be blank
 
 // Identity of the texture view bound for the surface texture. Compared, never used.
@@ -143,6 +164,16 @@ static int texture_for(ID3D11DeviceContext* ctx) {
     rec.height = info.height;
     rec.solid = info.solid;
     rec.uniform = info.uniform;
+    rec.has_mean = info.has_mean;
+    memcpy(rec.mean_rgb, info.mean_rgb, sizeof rec.mean_rgb);
+    load_remembered_means();
+    if (info.has_mean && !g_remembered_means.count(info.hash)) {
+      RememberedMean m;
+      memcpy(m.rgb, info.mean_rgb, sizeof m.rgb);
+      g_remembered_means[info.hash] = m;
+      FILE* f = _wfopen(means_file().c_str(), L"a");
+      if (f) { fprintf(f, "%016llx %.4f %.4f %.4f\n", (unsigned long long)info.hash, m.rgb[0], m.rgb[1], m.rgb[2]); fclose(f); }
+    }
     memcpy(rec.solid_rgba, info.solid_rgba, sizeof rec.solid_rgba);
     first_time_ever = !info.already_on_disk;
   } else {
@@ -190,6 +221,8 @@ static bool load_level(ID3D11DeviceContext* ctx, ID3D11Buffer* vb, ID3D11Buffer*
   g_anim_slot = -1;
   g_anim_values.clear();
   g_water.clear();
+  g_baked.steady.clear();
+  g_baked.layers.clear();
   ++g_lights_generation;
   g_mission_attempts = 0;
   g_mission_tried_with = 0;
@@ -354,6 +387,9 @@ static void load_remembered_polygons() {
     swprintf(dds, 64, L"%016llx.dds", hash);
     rec.path = g_texture_dir + dds;
     rec.hash = hash;
+    load_remembered_means();
+    auto mean = g_remembered_means.find(hash);
+    if (mean != g_remembered_means.end()) { rec.has_mean = true; memcpy(rec.mean_rgb, mean->second.rgb, sizeof rec.mean_rgb); }
     int index = -1;
     if (GetFileAttributesW(rec.path.c_str()) != INVALID_FILE_ATTRIBUTES) {
       index = (int)g_textures.size();
@@ -1222,6 +1258,8 @@ ID3D11Texture2D* scene_world_target() { return g_world_target_frame == g_frame ?
 // carries its polygon's number, how many animated layers the polygon has and where its run
 // of entries starts; the mission file says which light each layer of each polygon is. The
 // two are only trusted if they agree on the layer count of practically every polygon.
+const BakedLight& scene_baked_light() { return g_baked; }
+
 int scene_water_at(uint32_t start) {
   if (g_water.empty() || start >= g_world.indices.size()) return 0;
   uint32_t vi = g_world.indices[start];
@@ -1257,6 +1295,16 @@ static void connect_light_feeds(const std::vector<int>& scene_index) {
     }
   }
   bool trusted = checked > 0 && agree * 1000 >= checked * 995 && layered > 0;
+  g_baked.steady.clear();
+  g_baked.layers.clear();
+  if (trusted && file.baked.size() == polys && file.layer.size() == file.lights.size()) {
+    g_baked.steady = file.baked;
+    for (size_t poly = 0; poly < polys; ++poly)
+      for (unsigned e = file.first[poly]; e < file.first[poly + 1]; ++e) {
+        unsigned light = file.lights[e];
+        if (light < scene_index.size() && scene_index[light] >= 0) g_baked.layers.push_back({ (uint32_t)poly, scene_index[light], file.layer[e] });
+      }
+  }
   g_water.clear();
   if (trusted && file.water.size() == polys) {
     size_t surfaces = 0;

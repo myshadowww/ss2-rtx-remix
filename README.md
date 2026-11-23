@@ -22,9 +22,10 @@ your own download of the Remix runtime; neither is in this repository.
 - The level's lights, read from the mission file the game has loaded (recognised by the
   level's geometry), including spotlights; flashing, flickering and switched lights follow
   the engine's own per-frame values; muzzle flashes and other moving lights.
-- Brightness close to the engine's in corridors and ordinary rooms: the same views
-  rendered both ways are within about 15% in mean level, on the dark side. (Large rooms
-  are darker than the engine's; see below.)
+- Brightness and light colour close to the engine's: each light's strength is fitted to
+  the lightmaps the engine baked (read from the mission file), in linear light and less
+  what bounced light adds. The same views rendered both ways are within about 10% in mean
+  level in the two large test rooms, and within 30% either way in a dark corridor.
 - Particles and sparks; water surfaces (mirror-smooth, or a see-through skin).
 - Screens, lit signs, glow layers, decals, see-through surfaces, the sky box through
   windows.
@@ -48,11 +49,10 @@ DLSS Performance. The game stays at its 120 fps cap at 720p and 1080p.
 
 ## What does not
 
-- Lights fall off with the square of the distance, the engine's with the distance. Each
-  light's strength is fitted to the room it lights and lights close to a wall are moved a
-  little way out from it. That holds for corridors; large rooms come out at 60 to 75% of
-  the engine's brightness, and the engine's coloured lights tint walls more strongly than
-  the path-traced picture does.
+- Lighting is fitted, not identical: lights fall off with the square of the distance
+  and the engine's with the distance, so surfaces near a light are brighter than the
+  engine's and far ones darker even when the room as a whole matches. Coloured light is a
+  little weaker than the engine's.
 - Water does not bend light: it is the engine's texture made smooth, or a tinted skin.
 - Particles take one colour a batch, not one a vertex.
 - Materials have one default roughness unless you write overrides. No remastered content
@@ -66,9 +66,6 @@ DLSS Performance. The game stays at its 120 fps cap at 720p and 1080p.
 
 ## Backlog
 
-- **Calibrate the lights against the engine's own lightmaps.** The mission files hold
-  what the engine baked on every polygon. Fitting each light's strength to that, and not
-  to an assumed falloff rule, is the way to close the gap in large rooms and in colour.
 - Playing the game through path traced, deck by deck, to find the engine's remaining
   special cases.
 - Water with real refraction; per-vertex colour on particles.
@@ -162,6 +159,8 @@ Other findings worth knowing if you build on the Remix API:
 - **G1b: replacement mods do not apply to API-submitted content** in 1.6.1. A hand-written
   mod replacing eleven of our materials loaded and changed nothing; external draws bypass
   the replacement lookup.
+- **A spotlight's `coneSoftness` is a span of the cosine of the angle**, not of the angle
+  (the shader does a smooth step from the cone's cosine to that plus the softness).
 - **A mesh is known by its hash.** Creating a replacement mesh with the same hash and
   then destroying the old one destroys the new one too.
 - **DLSS neural rendering is masked per material** (the `dlssControlMask*` fields of the

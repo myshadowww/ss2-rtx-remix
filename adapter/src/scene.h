@@ -18,6 +18,8 @@ struct SceneTexture {
   bool solid = false;              // one flat colour: use it as a constant instead of a texture
   float solid_rgba[4] = { 1, 1, 1, 1 };
   bool uniform = false;            // blank: one transparent block repeated (an empty layer)
+  bool has_mean = false;           // a rough average colour is known (not for textures only remembered from an earlier run)
+  float mean_rgb[3] = { 0.5f, 0.5f, 0.5f };
 };
 
 // One world polygon as the engine draws it: a run of indices with one texture.
@@ -217,6 +219,18 @@ const World& scene_world();
 const std::vector<SceneTexture>& scene_textures();
 const Camera& scene_camera();
 const std::vector<ModelMesh>& scene_models();
+// What the engine baked on the level, by polygon number (the low 19 bits of a level
+// vertex's flags), when the mission file's cells were tied to the level and trusted; empty
+// otherwise. `steady`: the mean lightmap value from the lights that never change (-1:
+// none). `layers`: for an animated light (index into scene_lights()), the mean of its own
+// lightmap layer on one polygon at the light's full brightness.
+struct BakedLayer { uint32_t polygon; int light; float mean; };
+struct BakedLight {
+  std::vector<float> steady;
+  std::vector<BakedLayer> layers;
+};
+const BakedLight& scene_baked_light();
+
 // 0, or what the level polygon whose indices start at `start` is by the mission file: 1 a
 // water surface seen from the air, 2 one seen from under the water.
 int scene_water_at(uint32_t start);

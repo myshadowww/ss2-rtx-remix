@@ -37,6 +37,12 @@ struct MissionPolyLights {
   // Per polygon: 0, or what a textured opening between two cells is, which in this game
   // is always a water surface: 1 seen from the air, 2 seen from under the water.
   std::vector<unsigned char> water;
+  // What the engine baked: the mean of each polygon's lightmap for the lights that never
+  // change (0 to 1, 1 being the texture at full brightness; -1 where there is none), and
+  // for each entry of `lights` the mean of that light's own layer on that polygon, which
+  // the engine scales by the light's brightness of the moment.
+  std::vector<float> baked;
+  std::vector<float> layer;
 };
 const MissionPolyLights& mission_poly_lights();
 

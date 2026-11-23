@@ -115,6 +115,8 @@ static void read_cells(const std::vector<unsigned char>& w, int kind) {
   g_poly_lights.first.clear();
   g_poly_lights.lights.clear();
   g_poly_lights.water.clear();
+  g_poly_lights.baked.clear();
+  g_poly_lights.layer.clear();
   auto u32 = [&](size_t at) { unsigned v = 0; if (at + 4 <= w.size()) memcpy(&v, &w[at], 4); return v; };
   size_t p = kind == 2 ? 28 : 8;
   unsigned cells = u32(kind == 2 ? 24 : 4);
@@ -148,11 +150,29 @@ static void read_cells(const std::vector<unsigned char>& w, int kind) {
         memcpy(&light, &w[anim_at + 2 * (size_t)b], 2);
         g_poly_lights.lights.push_back(light);
       }
-      p += (size_t)(1 + layers) * width * height * texel;
+      // The lightmap itself: the steady layer first, then one layer per animated light.
+      size_t texels = (size_t)width * height;
+      if (p + (size_t)(1 + layers) * texels * texel > w.size()) { ok = false; break; }
+      for (unsigned layer = 0; layer <= layers; ++layer) {
+        const unsigned char* data = &w[p + (size_t)layer * texels * texel];
+        double sum = 0.0;
+        for (size_t t = 0; t < texels; ++t) {
+          if (texel == 4) sum += (data[t * 4] + data[t * 4 + 1] + data[t * 4 + 2]) / (3.0 * 255.0);
+          else if (texel == 2) {
+            unsigned v = data[t * 2] | data[t * 2 + 1] << 8;
+            sum += ((v & 31) + (v >> 5 & 31) + (v >> 10 & 31)) / (3.0 * 31.0);
+          } else sum += data[t] / 255.0;
+        }
+        float mean = texels ? (float)(sum / (double)texels) : -1.0f;
+        if (layer == 0) g_poly_lights.baked.push_back(mean);
+        else g_poly_lights.layer.push_back(mean < 0.0f ? 0.0f : mean);
+      }
+      p += (size_t)(1 + layers) * texels * texel;
     }
     if (p + 4 > w.size()) { ok = false; break; }
     p += 4 + 2 * (size_t)u32(p);
   }
+  if (ok && g_poly_lights.layer.size() != g_poly_lights.lights.size()) ok = false;
   if (!ok) {
     g_poly_lights.first.clear();
     g_poly_lights.lights.clear();
@@ -202,6 +222,8 @@ bool mission_find_lights(const std::vector<float>& anchors, std::vector<MissionL
   g_poly_lights.first.clear();
   g_poly_lights.lights.clear();
   g_poly_lights.water.clear();
+  g_poly_lights.baked.clear();
+  g_poly_lights.layer.clear();
   static_assert(sizeof(MissionLight) == kRecord, "light record layout");
   double t0 = now_ms();
   unsigned missions = 0;
@@ -245,6 +267,8 @@ bool mission_find_by_geometry(const std::vector<float>& vertices, std::vector<Mi
   g_poly_lights.first.clear();
   g_poly_lights.lights.clear();
   g_poly_lights.water.clear();
+  g_poly_lights.baked.clear();
+  g_poly_lights.layer.clear();
   if (vertices.size() < 9) return false;
   double t0 = now_ms();
   unsigned missions = 0;

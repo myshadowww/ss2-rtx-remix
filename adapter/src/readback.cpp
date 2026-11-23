@@ -96,6 +96,50 @@ static bool looks_blank(const std::vector<uint8_t>& top, unsigned unit, int form
   return false;
 }
 
+// The average colour of one mip level, near enough: for block-compressed formats the mean
+// of each block's two end colours (first pair only for BC7's multi-part modes).
+static bool rough_mean(const std::vector<uint8_t>& mip, unsigned unit, int format, float* out) {
+  double sum[3] = { 0, 0, 0 };
+  size_t n = 0;
+  bool bc1 = format >= 70 && format <= 72, bc23 = format >= 73 && format <= 78, bc7 = format >= 97 && format <= 99;
+  bool rgba8 = format >= 27 && format <= 29, bgra8 = format == 87 || format == 88 || (format >= 90 && format <= 93);
+  if (bc1 || bc23) {
+    for (size_t at = 0; at + unit <= mip.size(); at += unit) {
+      const uint8_t* b = mip.data() + at + (bc23 ? 8 : 0);
+      for (int e = 0; e < 2; ++e) {
+        unsigned v = b[e * 2] | b[e * 2 + 1] << 8;
+        sum[0] += (v >> 11 & 31) / 31.0; sum[1] += (v >> 5 & 63) / 63.0; sum[2] += (v & 31) / 31.0;
+        ++n;
+      }
+    }
+  } else if (bc7) {
+    // mode: bits before the first colour bit, bits per colour, end colours in the block
+    static const int head[8] = { 5, 8, 9, 10, 8, 8, 7, 14 }, bits[8] = { 4, 6, 5, 7, 5, 7, 7, 5 }, ends[8] = { 6, 4, 6, 4, 2, 2, 2, 4 };
+    for (size_t at = 0; at + 16 <= mip.size(); at += 16) {
+      const uint8_t* b = mip.data() + at;
+      int mode = 0;
+      while (mode < 8 && !(b[0] >> mode & 1)) ++mode;
+      if (mode >= 8) continue;
+      auto field = [&](int first, int count) {
+        unsigned v = 0;
+        for (int i = 0; i < count; ++i) v |= (unsigned)(b[(first + i) >> 3] >> ((first + i) & 7) & 1) << i;
+        return v;
+      };
+      for (int c = 0; c < 3; ++c)
+        for (int e = 0; e < 2; ++e) sum[c] += field(head[mode] + (c * ends[mode] + e) * bits[mode], bits[mode]) / (double)((1 << bits[mode]) - 1);
+      n += 2;
+    }
+  } else if (rgba8 || bgra8) {
+    for (size_t at = 0; at + 4 <= mip.size(); at += 4) {
+      sum[0] += mip[at + (bgra8 ? 2 : 0)] / 255.0; sum[1] += mip[at + 1] / 255.0; sum[2] += mip[at + (bgra8 ? 0 : 2)] / 255.0;
+      ++n;
+    }
+  }
+  if (!n) return false;
+  for (int c = 0; c < 3; ++c) out[c] = (float)(sum[c] / (double)n);
+  return true;
+}
+
 bool dump_texture_dds(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, DXGI_FORMAT view_format,
                       const std::wstring& dir, std::wstring* path, TextureDump* info) {
   D3D11_TEXTURE2D_DESC d;
@@ -134,6 +178,12 @@ bool dump_texture_dds(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture
   info->width = d.Width; info->height = d.Height; info->mips = d.MipLevels;
   info->format = concrete_format(d.Format, view_format);
   info->uniform = looks_blank(mips[0], unit, (int)d.Format);
+  {
+    // A mip of 16 texels a side or the smallest there is: few blocks, already averaged.
+    UINT pick = 0;
+    while (pick + 1 < d.MipLevels && ((d.Width >> pick) > 16 || (d.Height >> pick) > 16)) ++pick;
+    info->has_mean = rough_mean(mips[pick], unit, (int)d.Format, info->mean_rgb);
+  }
   int fid = (int)d.Format;
   bool rgba8 = fid >= 27 && fid <= 29, bgra8 = fid == 87 || fid == 88 || (fid >= 90 && fid <= 93);
   if ((rgba8 || bgra8) && d.Width * d.Height <= 64 * 64 && mips[0].size() >= 4) {
