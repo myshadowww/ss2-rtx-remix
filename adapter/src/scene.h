@@ -224,9 +224,9 @@ const std::vector<ModelMesh>& scene_models();
 // otherwise. `steady`: the mean lightmap value from the lights that never change (-1:
 // none). `layers`: for an animated light (index into scene_lights()), the mean of its own
 // lightmap layer on one polygon at the light's full brightness.
-struct BakedLayer { uint32_t polygon; int light; float mean; };
+struct BakedLayer { uint32_t polygon; int light; float mean[3]; };
 struct BakedLight {
-  std::vector<float> steady;
+  std::vector<float> steady;   // red, green, blue per polygon
   std::vector<BakedLayer> layers;
 };
 const BakedLight& scene_baked_light();

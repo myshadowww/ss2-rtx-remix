@@ -155,24 +155,29 @@ static void read_cells(const std::vector<unsigned char>& w, int kind) {
       if (p + (size_t)(1 + layers) * texels * texel > w.size()) { ok = false; break; }
       for (unsigned layer = 0; layer <= layers; ++layer) {
         const unsigned char* data = &w[p + (size_t)layer * texels * texel];
-        double sum = 0.0;
+        double sum[3] = { 0, 0, 0 };
         for (size_t t = 0; t < texels; ++t) {
-          if (texel == 4) sum += (data[t * 4] + data[t * 4 + 1] + data[t * 4 + 2]) / (3.0 * 255.0);
-          else if (texel == 2) {
+          if (texel == 4) {   // stored blue, green, red, alpha
+            sum[0] += data[t * 4 + 2] / 255.0; sum[1] += data[t * 4 + 1] / 255.0; sum[2] += data[t * 4] / 255.0;
+          } else if (texel == 2) {
             unsigned v = data[t * 2] | data[t * 2 + 1] << 8;
-            sum += ((v & 31) + (v >> 5 & 31) + (v >> 10 & 31)) / (3.0 * 31.0);
-          } else sum += data[t] / 255.0;
+            sum[0] += (v >> 10 & 31) / 31.0; sum[1] += (v >> 5 & 31) / 31.0; sum[2] += (v & 31) / 31.0;
+          } else {
+            for (int c = 0; c < 3; ++c) sum[c] += data[t] / 255.0;
+          }
         }
-        float mean = texels ? (float)(sum / (double)texels) : -1.0f;
-        if (layer == 0) g_poly_lights.baked.push_back(mean);
-        else g_poly_lights.layer.push_back(mean < 0.0f ? 0.0f : mean);
+        for (int c = 0; c < 3; ++c) {
+          float mean = texels ? (float)(sum[c] / (double)texels) : -1.0f;
+          if (layer == 0) g_poly_lights.baked.push_back(mean);
+          else g_poly_lights.layer.push_back(mean < 0.0f ? 0.0f : mean);
+        }
       }
       p += (size_t)(1 + layers) * texels * texel;
     }
     if (p + 4 > w.size()) { ok = false; break; }
     p += 4 + 2 * (size_t)u32(p);
   }
-  if (ok && g_poly_lights.layer.size() != g_poly_lights.lights.size()) ok = false;
+  if (ok && g_poly_lights.layer.size() != g_poly_lights.lights.size() * 3) ok = false;
   if (!ok) {
     g_poly_lights.first.clear();
     g_poly_lights.lights.clear();

@@ -24,9 +24,11 @@ your own download of the Remix runtime; neither is in this repository.
   the engine's own per-frame values; muzzle flashes and other moving lights.
 - Brightness and light colour close to the engine's: each light's strength is fitted to
   the lightmaps the engine baked (read from the mission file), in linear light and less
-  what bounced light adds. The same views rendered both ways are within about 10% in mean
-  level in the two large test rooms, and within 30% either way in a dark corridor.
-- Particles and sparks; water surfaces (mirror-smooth, or a see-through skin).
+  what bounced light adds, channel by channel. The same views rendered both ways are
+  within about a quarter of each other in mean level (a large hangar up to 26% brighter,
+  a dark corridor 24% darker).
+- Particles and sparks with the engine's own blend and per-vertex colour; water surfaces
+  (mirror-smooth, a see-through skin, or a boundary that bends light).
 - Screens, lit signs, glow layers, decals, see-through surfaces, the sky box through
   windows.
 - The game's HUD, weapon, menus, saves and input, untouched.
@@ -53,14 +55,11 @@ DLSS Performance. The game stays at its 120 fps cap at 720p and 1080p.
   and the engine's with the distance, so surfaces near a light are brighter than the
   engine's and far ones darker even when the room as a whole matches. Coloured light is a
   little weaker than the engine's.
-- Water does not bend light: it is the engine's texture made smooth, or a tinted skin.
-- Particles take one colour a batch, not one a vertex.
 - Materials have one default roughness unless you write overrides. No remastered content
   is included.
 - Remix's replacement mods (the RTX Remix Toolkit workflow) do not apply to content
   submitted through the API in runtime 1.6.1, so the Toolkit cannot be used to author
   for this. The override table is the authoring route.
-- After path tracing is switched back on the picture is dim for about a second.
 - Linux and Proton only so far. The adapter is ordinary Win32 code and may well work on
   Windows; it has not been tried.
 
@@ -68,7 +67,8 @@ DLSS Performance. The game stays at its 120 fps cap at 720p and 1080p.
 
 - Playing the game through path traced, deck by deck, to find the engine's remaining
   special cases.
-- Water with real refraction; per-vertex colour on particles.
+- Finer lighting: the fit uses each polygon's mean lightmap value; sampling the
+  lightmaps texel by texel would tighten dark corridors and large rooms further.
 
 ## How it works
 

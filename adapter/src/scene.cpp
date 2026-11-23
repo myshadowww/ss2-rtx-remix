@@ -1297,12 +1297,13 @@ static void connect_light_feeds(const std::vector<int>& scene_index) {
   bool trusted = checked > 0 && agree * 1000 >= checked * 995 && layered > 0;
   g_baked.steady.clear();
   g_baked.layers.clear();
-  if (trusted && file.baked.size() == polys && file.layer.size() == file.lights.size()) {
+  if (trusted && file.baked.size() == polys * 3 && file.layer.size() == file.lights.size() * 3) {
     g_baked.steady = file.baked;
     for (size_t poly = 0; poly < polys; ++poly)
       for (unsigned e = file.first[poly]; e < file.first[poly + 1]; ++e) {
         unsigned light = file.lights[e];
-        if (light < scene_index.size() && scene_index[light] >= 0) g_baked.layers.push_back({ (uint32_t)poly, scene_index[light], file.layer[e] });
+        if (light < scene_index.size() && scene_index[light] >= 0)
+          g_baked.layers.push_back({ (uint32_t)poly, scene_index[light], { file.layer[e * 3], file.layer[e * 3 + 1], file.layer[e * 3 + 2] } });
       }
   }
   g_water.clear();

@@ -90,7 +90,8 @@ variables override it):
 | `LinearLightColour` | 1 | convert light colours to linear light so coloured lights tint as strongly as the engine's |
 | `StandOff` | 1 | move lights that sit close to a wall a little way out from it, so the wall gets a soft glow as in the engine, not a small bright disc |
 | `Sprites` | 1 | put the engine's particles, sparks and coronas into the path-traced scene (they are drawn before the point where the path-traced image replaces the engine's, so otherwise they are lost) |
-| `Water` | 1 | water surfaces, which the mission file marks: 0 as the engine textures them, 1 the same but mirror-smooth so they reflect, 2 a see-through tinted skin |
+| `Water` | 1 | water surfaces, which the mission file marks: 0 as the engine textures them, 1 the same but mirror-smooth so they reflect, 2 a see-through tinted skin, 3 a boundary that bends light |
+| `SpriteVertexColour` | 1 | particles keep each vertex's colour and fade, through the engine's own blend; 0: one averaged colour a batch |
 | `Look` | `engine` | `engine`: the engine's brightness, no tone mapping; `engine-tonemapped`: the same brightness through Remix's local tone mapper; `remix`: Remix's own auto exposure and tone mapping; `custom`: whatever the next three say |
 | `ToneMapping` | `off` | `off`, `local` (Remix's local tone mapper, filmic) or `global` (Remix's global curve, which follows the view) |
 | `AutoExposure` | 0 | let Remix adapt brightness to what is on screen |
@@ -180,14 +181,14 @@ anything heavy on the disk at the same time: the menu keys are timed.
 - The path-traced image goes in at the engine's first post-process draw of the frame
   (ambient occlusion, bloom, anti-aliasing or colour correction). With every one of those
   turned off in the game's settings there is nothing to hook, and the engine's image shows.
-- Particles and sparks are in the path-traced scene as glowing or blended quads, one
-  colour a batch. `Sprites=0` leaves them out.
-- After path tracing is switched back on (Scroll Lock) the picture is dim for about a
-  second while Remix converges.
+- Particles and sparks are in the path-traced scene as glowing or blended quads.
+  `Sprites=0` leaves them out.
+- After path tracing is switched back on (Scroll Lock) the engine's picture stays up for
+  a second and a half while Remix's lighting settles.
 - The sky is the engine's own box and textures, shown at the engine's brightness; it
   lights nothing to speak of. `Sky=0` in `ss2rtx.ini` leaves it out. Water is the
-  engine's texture made mirror-smooth, or a see-through skin (`Water`); neither bends
-  light.
+  engine's texture made mirror-smooth by default; `Water` can make it a see-through skin
+  or a boundary that bends light.
 - Path-traced rooms are lit by bounced light as well, so walls near a lit floor are
   brighter than the engine's; screens and lamps light what is around them.
 - Flashing, flickering and switched lights take their brightness from the engine every
@@ -198,8 +199,8 @@ anything heavy on the disk at the same time: the menu keys are timed.
   light's strength is fitted to what the engine baked into its lightmaps, less what
   bounced light will add, and lights close to a wall are moved a little way out from it
   (two units at most) so the wall gets a glow, not a small bright disc. Measured against
-  the engine in the same views: the station's hangar and Hydroponics within about 10%,
-  the MedSci corridor between 30% darker and 30% brighter depending on the view. Colours
+  the engine in the same views: within about a quarter either way (the station's hangar
+  up to 26% brighter, a dark MedSci corridor 24% darker, Hydroponics in between). Colours
   are close; the engine's are a little stronger. F11, exposure, changes the overall level.
 - Every mission loads and renders (`tools/sweep.py`), but each was only looked at from
   its start position.
