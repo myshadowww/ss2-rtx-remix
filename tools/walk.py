@@ -26,6 +26,9 @@ from pathlib import Path
 
 from PIL import Image, ImageStat
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import steam_game_running
+
 ROOT = Path(__file__).resolve().parent.parent
 GAME = ROOT / 'game'
 RUN = ROOT / 'run/game'
@@ -133,6 +136,10 @@ def main():
                 sys.exit('the Steam copy of the game is running; stopping')
             key = f'{name}-{n}'
             at = ','.join(f'{v:.1f}' for v in spot)
+            if steam_game_running.running():   # the player has started their own game: stop here
+                print('stopped: the Steam copy of the game is running')
+                subprocess.run([sys.executable, str(ROOT / 'tools/tour.py'), 'off'], stdout=subprocess.DEVNULL)
+                sys.exit(3)
             subprocess.run([sys.executable, str(ROOT / 'tools/tour.py'), name, f'--at={at},0'], check=True, stdout=subprocess.DEVNULL)
             subprocess.run([sys.executable, str(ROOT / 'launch.py'), '--seconds', '51', '--scenario', 'tour', '--composite',
                             '--keys', '44.4:rtx_off', '--screenshot-at', '43.5', '--screenshot-at', '47.6'],

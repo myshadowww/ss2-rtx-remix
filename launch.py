@@ -121,6 +121,11 @@ def main():
     p.add_argument('--gpu', type=int, default=0)
     p.add_argument('--proton-log', action='store_true')
     a = p.parse_args()
+    # Never beside the player's own game: two copies fight over the GPU and the window focus.
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import steam_game_running
+    if steam_game_running.running():
+        sys.exit('the Steam copy of the game is running: no test launch while it is being played')
 
     exe = GAME / 'SystemShock2Remastered.exe'
     if not exe.exists():
