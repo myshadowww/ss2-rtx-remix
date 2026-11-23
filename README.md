@@ -12,8 +12,33 @@ draws its weapon, HUD and menus on top.
 **Work in progress.** Every mission loads and renders path traced, and it is playable, but
 nobody has played the game through this way. See "What works" and "What does not" below.
 
-Not affiliated with Nightdive Studios or NVIDIA. You need your own copy of the game and
-your own download of the Remix runtime; neither is in this repository.
+Not affiliated with Nightdive Studios or NVIDIA. You need your own copy of the game.
+NVIDIA's Remix runtime is not in this repository; the installer fetches it from NVIDIA's
+own release page.
+
+## Quick start
+
+You need the game on Steam (app 866570), Proton, an NVIDIA RTX GPU with a current driver,
+and Python 3.
+
+1. Get this repository and run the installer. It finds the game through Steam, fetches
+   the adapter and NVIDIA's RTX Remix runtime 1.6.1 (557 MB, checked against a known
+   SHA-256), and backs up every file it replaces:
+
+       git clone https://github.com/myshadowww/ss2-rtx-remix
+       cd ss2-rtx-remix
+       python3 install.py install --steam
+
+2. In Steam, open the game's Properties > General and set the launch options to the line
+   the installer printed:
+
+       WINEDLLOVERRIDES="dxgi=n,b" RTX_SENTRY_TEST_DSN="http://none@127.0.0.1:9/0" %command%
+
+3. Start the game with its renderer set to Direct3D 11 (Options > Video). F11 opens the
+   settings panel; Scroll Lock switches between path traced and the engine's renderer.
+
+`python3 install.py uninstall --steam` puts everything back; then clear the launch
+options. `USAGE.md` has the keys, every setting, material overrides and logs.
 
 ## What works
 
@@ -98,40 +123,26 @@ Source layout:
 | `adapter/src/menu.cpp` | the F11 panel |
 | `adapter/src/census.cpp` | dumps one frame's draw stream for analysis |
 | `tests/` | stand-alone probes: Remix under Proton, readback, the D3D11 hand-off |
-| `build.py`, `install.py`, `launch.py`, `play.py`, `regress.py` | build, install, test launcher, Steam launch wrapper, regression check |
+| `build.py`, `install.py`, `launch.py`, `play.py`, `regress.py` | build, install, test launcher, optional Steam launch wrapper, regression check |
 | `tools/` | mission sweep, start-anywhere, side-by-side survey, a walk through every deck in both renderers, draw-stream census reader |
 
-## Building and running
-
-You need:
-
-- The game (Steam app 866570) with its renderer set to Direct3D 11.
-- Proton and an NVIDIA RTX GPU with a Vulkan ray tracing driver.
-- NVIDIA's RTX Remix runtime 1.6.1 for x64 games
-  (`rtx-remix-for-x64-games-release-remix-1.6.1.zip`,
-  sha256 `7dd1d44492a609050e44b0e3581cec31135d1ed88b4a91123b4faae91955716a`), unpacked
-  to `runtime/remix-1.6.1-x64/`.
-- The matching API header `remix_c.h` (dxvk-remix tag `remix-1.6.1`,
-  `public/include/remix/`) in `runtime/sdk-1.6.1/include/remix/`.
-- llvm-mingw (built with 20261104, UCRT) at `toolchain/llvm-mingw/`. No Windows SDK.
-- Python 3 with Pillow for the test tools.
-
-Then:
+## Building it yourself
 
     python3 build.py adapter                 # builds adapter/build/dxgi.dll
-    python3 install.py install --steam       # into the Steam game folder, with backups
-    python3 install.py uninstall --steam     # puts everything back
+    python3 install.py install --steam       # installs your build instead of the released one
 
-and set the game's Steam launch options to
+The first build fetches the compiler, llvm-mingw 20261104 (84 MB, checked against a known
+SHA-256), into `toolchain/`. Nothing else is needed: no Windows SDK, and the Remix API
+header (`remix_c.h`, MIT, from dxvk-remix tag `remix-1.6.1`) is in `adapter/third_party/`.
+The test tools need Pillow.
 
-    /usr/bin/env -u LD_LIBRARY_PATH /usr/bin/python3 /path/to/ss2-rtx-remix/play.py -- %command%
+`USAGE.md` has the developer commands: a private test copy of the game, scripted runs,
+the regression check, the sweep, survey and walk.
 
-`USAGE.md` has the keys, every setting, material overrides, logs and the developer
-commands (private test copy, scripted runs, sweep, survey).
-
-`setup_game.py` and `gpu_session.py` carry assumptions from the machine this was
-developed on (a second project folder to copy a game profile from; a GPU service to
-pause, named in an untracked `local.json`). Read them before use.
+`play.py` is an optional launch wrapper for a machine with several GPUs or with a service
+that fills the GPU's memory; `setup_game.py` and `gpu_session.py` carry assumptions from
+the machine this was developed on (a second project folder to copy a game profile from).
+Read them before use.
 
 ## Running Remix under Proton: what is not optional
 
@@ -177,4 +188,10 @@ Other findings worth knowing if you build on the Remix API:
 
 MIT, see `LICENSE`. That covers the code in this repository only. System Shock 2 and its
 assets belong to their owners; RTX Remix and DLSS are NVIDIA's and come under NVIDIA's
-licences.
+licences, which is why the installer fetches the runtime from NVIDIA instead of this
+repository carrying it.
+
+`adapter/third_party/remix/remix_c.h` is NVIDIA's Remix API header (MIT, licence text in
+the file). The released `dxgi.dll` is this repository's code built with llvm-mingw and
+statically linked with its runtime libraries (libc++, libunwind and compiler-rt under
+Apache-2.0 with LLVM exceptions; the mingw-w64 runtime under its own permissive terms).

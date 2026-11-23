@@ -18,8 +18,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import install
+
 ROOT = Path(__file__).resolve().parent
-STEAM_GAME = Path.home() / '.local/share/Steam/steamapps/common/System Shock 2 Remastered'
 PROFILE_SOURCE = ROOT.parent / 'dx11/prefix/pfx/drive_c/users/steamuser/Saved Games/Nightdive Studios/System Shock 2 Remastered'
 PROFILE_REL = Path('pfx/drive_c/users/steamuser/Saved Games/Nightdive Studios/System Shock 2 Remastered')
 GAME = ROOT / 'game'
@@ -29,7 +30,10 @@ MANIFEST = ROOT / 'game.json'
 MOD_FILES = ['dxgi.dll', 'd3dcompiler_47.dll', 'ss2_ms_d3dcompiler_47.dll', 'nvngx_dlss.dll', 'nvngx_dlssnr.dll',
              'SS2DLSS.ini', 'SS2NRControls.ini', 'SS2NRControls.log', 'SS2GraphicsHook.log', 'README.md',
              'DLSSNR_REFERENCE_LICENSE.txt', 'NVIDIA_RTX_SDK_LICENSE.txt', 'THIRD_PARTY_NOTICES.txt', 'SS2ShaderCache',
-             'SS2ShaderDump']
+             'SS2ShaderDump',
+             # ...and anything an ss2rtx install in the Steam folder has put there: the test copy
+             # gets the adapter from launch.py and must not inherit the player's settings.
+             'ss2rtx', 'ss2rtx_cache', 'rtx.conf', 'rtx-remix', 'remix-shim.log', 'metrics.txt', '.sentry-native']
 
 
 def sha256(path):
@@ -55,8 +59,9 @@ def main():
     if a.status:
         print(MANIFEST.read_text() if MANIFEST.exists() else 'not set up')
         return
-    if not (STEAM_GAME / 'SystemShock2Remastered.exe').exists():
-        sys.exit(f'game not found at {STEAM_GAME}')
+    STEAM_GAME = install.find_game()
+    if not STEAM_GAME:
+        sys.exit(f'{install.GAME_FOLDER} was not found in any Steam library')
 
     if GAME.exists():
         shutil.rmtree(GAME)

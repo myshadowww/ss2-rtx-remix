@@ -1,32 +1,111 @@
 #!/usr/bin/env python3
 """Install or remove the ss2rtx adapter and Remix runtime in a System Shock 2 Remastered folder.
 
-  python3 install.py install --target game          # the private development copy
-  python3 install.py uninstall --target game
-  python3 install.py status --target game
-  python3 install.py install --steam                # the real Steam install (see below)
+  python3 install.py install --steam                # the Steam installation, found through Steam's library list
+  python3 install.py uninstall --steam
+  python3 install.py status --steam
+  python3 install.py launch-options                 # the line to paste into the game's Steam launch options
+  python3 install.py install --target <folder>      # any other copy of the game
+
+What is not there yet is fetched: NVIDIA's RTX Remix runtime 1.6.1 from NVIDIA's own
+release page (557 MB, checked against a known SHA-256), and the adapter itself from this
+project's releases if it has not been built here (build.py adapter).
 
 Every file that is replaced is first copied to <target>/ss2rtx/backup/, and everything
 done is recorded in <target>/ss2rtx/install-manifest.json, which `uninstall` replays in
-reverse. Nothing outside the target folder is touched.
-
---steam targets the real Steam installation. It replaces the dxgi.dll that is there now
-(the SS2GraphicsHook upscaler mod, if installed); uninstall puts it back. The Steam launch
-options are not changed by this script: see USAGE.md.
+reverse. Nothing outside the target folder is touched. An existing dxgi.dll (another mod's
+hook, say) is replaced; uninstall puts it back. The Steam launch options are not changed
+by this script: it prints the line to set.
 """
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
+import urllib.request
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-STEAM_GAME = Path.home() / '.local/share/Steam/steamapps/common/System Shock 2 Remastered'
+GAME_FOLDER = 'System Shock 2 Remastered'
 RUNTIME = ROOT / 'runtime/remix-1.6.1-x64'
+RUNTIME_URL = 'https://github.com/NVIDIAGameWorks/rtx-remix/releases/download/remix-1.6.1/rtx-remix-for-x64-games-release-remix-1.6.1.zip'
+RUNTIME_SHA256 = '7dd1d44492a609050e44b0e3581cec31135d1ed88b4a91123b4faae91955716a'
 ADAPTER = ROOT / 'adapter/build/dxgi.dll'
+ADAPTER_URL = 'https://github.com/myshadowww/ss2-rtx-remix/releases/latest/download/dxgi.dll'
+# The game needs our dxgi.dll loaded in place of Wine's, and Remix's crash reporter (which
+# is consent-gated and has no consent) pointed at a dead address.
+LAUNCH_OPTIONS = 'WINEDLLOVERRIDES="dxgi=n,b" RTX_SENTRY_TEST_DSN="http://none@127.0.0.1:9/0" %command%'
+
+
+def find_game():
+    """The game's folder, looked for in every Steam library on this machine."""
+    roots = [Path.home() / '.local/share/Steam', Path.home() / '.steam/steam', Path.home() / '.steam/root',
+             Path.home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam']
+    libraries = []
+    for root in roots:
+        listing = root / 'steamapps/libraryfolders.vdf'
+        if not listing.exists():
+            continue
+        libraries.append(root)
+        libraries += [Path(m) for m in re.findall(r'"path"\s+"([^"]+)"', listing.read_text(errors='replace'))]
+    for library in libraries:
+        game = library / 'steamapps/common' / GAME_FOLDER
+        if (game / 'SystemShock2Remastered.exe').exists():
+            return game.resolve()
+    return None
+
+
+def download(url, dest, what):
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    partial = dest.with_name(dest.name + '.part')
+    request = urllib.request.Request(url, headers={'User-Agent': 'ss2rtx-install'})
+    with urllib.request.urlopen(request, timeout=60) as response, open(partial, 'wb') as out:
+        total = int(response.headers.get('Content-Length') or 0)
+        done = 0
+        while True:
+            block = response.read(1 << 20)
+            if not block:
+                break
+            out.write(block)
+            done += len(block)
+            if total and sys.stdout.isatty():
+                print(f'\r  {what}: {done >> 20} of {total >> 20} MiB', end='', flush=True)
+    print(('\r' if total and sys.stdout.isatty() else '') + f'  {what}: {done >> 20} MiB fetched')
+    partial.replace(dest)
+
+
+def ensure_runtime():
+    """NVIDIA's runtime, from NVIDIA: it is not ours to hand out."""
+    if (RUNTIME / 'd3d9.dll').exists():
+        return
+    archive = ROOT / 'runtime/downloads' / RUNTIME_URL.rsplit('/', 1)[1]
+    if not archive.exists():
+        print("fetching the RTX Remix runtime 1.6.1 from NVIDIA's release page")
+        download(RUNTIME_URL, archive, 'runtime')
+    if sha256(archive) != RUNTIME_SHA256:
+        sys.exit(f'{archive} is not the file expected (SHA-256 differs); delete it and run this again')
+    print('unpacking the runtime')
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive) as z:
+        z.extractall(RUNTIME)
+    if not (RUNTIME / 'd3d9.dll').exists():
+        sys.exit('the runtime archive did not hold what was expected')
+
+
+def ensure_adapter():
+    if ADAPTER.exists():
+        return
+    print('no adapter built here: fetching the released dxgi.dll')
+    try:
+        download(ADAPTER_URL, ADAPTER, 'adapter')
+    except Exception as error:
+        sys.exit(f"could not fetch it ({error}).\nEither download dxgi.dll from the project's releases into {ADAPTER.parent},\n"
+                 'or build it: python3 build.py adapter')
+
 
 # Remix settings; the first two are required under Proton (README.md).
 RTX_CONF = """# Written by ss2rtx install.py
@@ -140,10 +219,8 @@ def put(target, rel, manifest, *, source=None, text=None, keep_existing=False):
 def install(target):
     if not (target / 'SystemShock2Remastered.exe').exists():
         sys.exit(f'{target} is not a System Shock 2 Remastered folder')
-    if not ADAPTER.exists():
-        sys.exit('adapter not built: run build.py adapter')
-    if not (RUNTIME / 'd3d9.dll').exists():
-        sys.exit(f'Remix runtime missing at {RUNTIME}')
+    ensure_adapter()
+    ensure_runtime()
     manifest_path = target / 'ss2rtx/install-manifest.json'
     settings = target / 'ss2rtx/ss2rtx.ini'
     stored = settings.read_text() if settings.exists() else None   # what the settings panel has stored survives a re-install
@@ -172,6 +249,8 @@ def install(target):
     print(f"  added {len(manifest['added'])} files, replaced {len(manifest['replaced'])} (backed up), kept {len(manifest['kept'])}")
     for r in manifest['replaced']:
         print(f"  replaced {r['file']} (backup: {r['backup']})")
+    print("\nSet the game's Steam launch options (Properties > General) to:\n\n  " + LAUNCH_OPTIONS +
+          '\n\nand its renderer to Direct3D 11. In game: F11 settings, Scroll Lock path tracing on/off.')
 
 
 def uninstall(target, purge=False, quiet=False):
@@ -225,14 +304,22 @@ def status(target):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('action', choices=['install', 'uninstall', 'status'])
+    p.add_argument('action', choices=['install', 'uninstall', 'status', 'launch-options'])
     p.add_argument('--target', type=Path, help='game folder')
-    p.add_argument('--steam', action='store_true', help='use the real Steam installation as the target')
+    p.add_argument('--steam', action='store_true', help="use the Steam installation as the target (found through Steam's library list)")
     p.add_argument('--purge', action='store_true', help='on uninstall, also remove caches and your materials.txt')
     a = p.parse_args()
+    if a.action == 'launch-options':
+        print(LAUNCH_OPTIONS)
+        return
     if a.steam == bool(a.target):
         p.error('give exactly one of --target or --steam')
-    target = (STEAM_GAME if a.steam else a.target).resolve()
+    if a.steam:
+        target = find_game()
+        if not target:
+            sys.exit(f'{GAME_FOLDER} was not found in any Steam library; give its folder with --target')
+    else:
+        target = a.target.resolve()
     if a.action != 'status' and game_running():
         sys.exit('System Shock 2 is running; close it first')
     if a.action == 'install':

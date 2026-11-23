@@ -113,6 +113,8 @@ def main():
     p.add_argument('--census-at', help='seconds after the first frame at which to capture a draw-stream census, e.g. "40,44"')
     p.add_argument('--env', action='append', default=[], metavar='K=V', help='extra environment for the game')
     p.add_argument('--track-memory', type=float, metavar='SECONDS', help='sample the game process RSS and GPU memory at this interval')
+    p.add_argument('--plain-env', action='store_true',
+                   help="run with only what the README's Steam launch options set (plus what running outside Steam needs)")
     p.add_argument('--teleport', action='append', default=[], metavar='X,Y,Z',
                    help='bind a teleport to that spot to the next of the keys y u o p n b (use them in --keys, after one press of h, which allows it); repeatable')
     p.add_argument('--live-input', action='store_true', help='let a scripted run (--keys/--scenario) react to the real keyboard and mouse as well')
@@ -161,6 +163,13 @@ def main():
         RTX_SENTRY_TEST_DSN='http://none@127.0.0.1:9/0',  # see runtest.py: never upload crash reports
         SS2RTX_LOG=winpath(RUN / 'ss2rtx.log'),
     )
+    if a.plain_env:
+        # What a player's Steam launch options give the game, and no more: to check that
+        # the short line in the README is enough.
+        for key in ('PROTON_FORCE_NVAPI', 'PROTON_ENABLE_WAYLAND', 'DLSSNR_DISABLE', 'DISABLE_VK_LAYER_VALVE_steam_overlay_1',
+                    'DISABLE_VK_LAYER_VALVE_steam_fossilize_1', 'WINEDEBUG'):
+            env.pop(key, None)
+        env['WINEDLLOVERRIDES'] = 'dxgi=n,b'
     if a.installed:
         env.pop('SS2RTX_LOG')   # default location: <game>/ss2rtx/ss2rtx.log
     if a.passthrough:

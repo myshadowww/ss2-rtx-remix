@@ -41,32 +41,44 @@ because the game uses every one of those for its quick-use slots.
 
 ## Install into the real Steam game
 
-Not done for you: it replaces the `dxgi.dll` that is there now (the SS2GraphicsHook
-upscaler mod), so the two cannot be active together.
-
-    python3 install.py install --steam
+    python3 install.py install --steam        # finds the game through Steam's library list
     python3 install.py status --steam
-    python3 install.py uninstall --steam      # puts the previous dxgi.dll and rtx.conf back
+    python3 install.py uninstall --steam      # puts back whatever dxgi.dll and rtx.conf were there
+    python3 install.py install --target <folder>   # any other copy of the game
 
-Then set the Steam launch options to:
+What is missing is fetched first: NVIDIA's RTX Remix runtime 1.6.1 from NVIDIA's release
+page (557 MB, into `runtime/`, checked against a known SHA-256), and the adapter from this
+project's releases unless you have built it (`python3 build.py adapter`).
+
+It replaces a `dxgi.dll` that is already in the game folder (another mod's hook, such as
+the SS2GraphicsHook upscaler mod), so the two cannot be active together; uninstall puts
+the other one back.
+
+Then set the game's Steam launch options (Properties > General) to the line the installer
+prints (`python3 install.py launch-options` prints it again):
+
+    WINEDLLOVERRIDES="dxgi=n,b" RTX_SENTRY_TEST_DSN="http://none@127.0.0.1:9/0" %command%
+
+The first part makes Proton load the adapter in place of its own `dxgi.dll`. The second
+points Remix's crash reporter at a dead local address; it is consent-gated and nothing
+here consents, and this makes sure. The game's renderer must be Direct3D 11.
+
+With several GPUs, or with a service that normally fills the GPU's memory, use the
+wrapper instead:
 
     /usr/bin/env -u LD_LIBRARY_PATH /usr/bin/python3 /path/to/ss2-rtx-remix/play.py -- %command%
 
-(with the real path of this folder). `play.py` sets the DLL overrides, pins GPU 0 and,
-if `local.json` names a service that fills the GPU, pauses and restores it around the
-session. The game's renderer must be Direct3D 11 (it already is for the
-existing mod). To go back to the upscaler mod: uninstall, and restore the previous launch
-options.
+It reads `local.json` next to it (not in the repository; every key optional):
+`{"gpu": 0, "pause_service": "some-unit.service"}` pins the game to that `nvidia-smi` GPU
+index, and stops that `systemd --user` service while the game runs and starts it again
+afterwards if it was running.
 
-The launch options matter: the old mod's `dx11/play.py` also starts the game, but it does
-not point Remix's crash reporter at a dead address and it leaves the old mod's helper DLL
-loaded.
+Run the install again after every rebuild of the adapter or update of this repository;
+your `ss2rtx.ini` (what the F11 panel stored) and `materials.txt` are kept, `rtx.conf` is
+rewritten.
 
-Run the install again after every rebuild of the adapter; your `ss2rtx.ini` (what the F11
-panel stored) is kept, `rtx.conf` is rewritten.
-
-The installer was tested on a scratch copy: install over an existing mod, then uninstall,
-leaves the folder byte-identical.
+The installer was tested on a scratch folder: fetch and unpack of the runtime, install
+over an existing `dxgi.dll`, then uninstall, which leaves the folder as it was.
 
 ## Settings
 
